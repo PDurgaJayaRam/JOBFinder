@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job AI Agent - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .animate-pulse-slow { animation: pulse 2s infinite; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .ats-high { background: #22c55e; }
+        .ats-mid { background: #eab308; }
+        .ats-low { background: #ef4444; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <nav class="bg-white shadow-sm border-b">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                    <span class="text-white font-bold text-sm">AI</span>
+                </div>
+                <span class="font-semibold text-lg text-gray-800">Saved Jobs Dashboard</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <a href="/" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">Chat</a>
+                <button onclick="loadJobs()" class="px-3 py-1.5 text-sm border rounded-lg hover:bg-gray-50">Refresh</button>
+                <button onclick="applyAll()" class="px-3 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">Apply All Pending</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 py-6">
+        <!-- Stats -->
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+            <div class="bg-white rounded-xl shadow-sm border p-4">
+                <div class="text-sm text-gray-500">Total Saved</div>
+                <div class="text-3xl font-bold text-blue-600" id="stat-total">0</div>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm border p-4">
+                <div class="text-sm text-gray-500">High ATS (70%+)</div>
+                <div class="text-3xl font-bold text-green-600" id="stat-high">0</div>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm border p-4">
+                <div class="text-sm text-gray-500">Medium ATS</div>
+                <div class="text-3xl font-bold text-yellow-600" id="stat-mid">0</div>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm border p-4">
+                <div class="text-sm text-gray-500">Pending Apply</div>
+                <div class="text-3xl font-bold text-orange-600" id="stat-pending">0</div>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm border p-4">
+                <div class="text-sm text-gray-500">Avg ATS Score</div>
+                <div class="text-3xl font-bold text-purple-600" id="stat-avg">0%</div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="bg-white rounded-xl shadow-sm border p-4 mb-6">
+            <div class="flex gap-2 flex-wrap">
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border bg-blue-100 text-blue-700 border-blue-200" onclick="filterJobs('all', this)">All</button>
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('high', this)">High ATS (70%+)</button>
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('pending', this)">Pending Apply</button>
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('applied', this)">Applied</button>
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('fresher', this)">Fresher Friendly</button>
+                <div class="flex-1"></div>
+                <button onclick="exportCSV()" class="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50">Export CSV</button>
+            </div>
+        </div>
+
+        <!-- Table -->
+        <div class="bg-white rounded-xl shadow-sm border overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Company</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ATS Score</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-table-body" class="divide-y divide-gray-100">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API = 'http://localhost:8000';
+        let allJobs = [];
+        let currentFilter = 'all';
+
+        async function loadJobs() {
+            try {
+                const [jobsResp, statsResp] = await Promise.all([
+                    fetch(`${API}/saved-jobs?limit=500`),
+                    fetch(`${API}/saved-jobs/stats`)
+                ]);
+                const jobsData = await jobsResp.json();
+                const stats = await statsResp.json();
+
+                allJobs = jobsData.jobs || [];
+                updateStats(stats);
+                renderJobs();
+            } catch(e) {
+                console.error('Load error:', e);
+            }
+        }
+
+        function updateStats(stats) {
+            document.getElementById('stat-total').textContent = stats.total || 0;
+            document.getElementById('stat-high').textContent = stats.high_ats || 0;
+            document.getElementById('stat-mid').textContent = stats.medium_ats || 0;
+            document.getElementById('stat-pending').textContent = (stats.total || 0) - (stats.high_ats || 0);
+            document.getElementById('stat-avg').textContent = (stats.avg_ats || 0) + '%';
+        }
+
+        function getFilteredJobs() {
+            switch(currentFilter) {
+                case 'high': return allJobs.filter(j => (j.ats_score || 0) >= 70);
+                case 'pending': return allJobs.filter(j => j.status !== 'applied');
+                case 'applied': return allJobs.filter(j => j.status === 'applied');
+                case 'fresher': return allJobs.filter(j => j.fresher_friendly);
+                default: return allJobs;
+            }
+        }
+
+        function filterJobs(filter, btn) {
+            currentFilter = filter;
+            document.querySelectorAll('.filter-btn').forEach(b => {
+                b.className = 'filter-btn px-3 py-1.5 rounded-lg text-sm border';
+            });
+            if (btn) btn.className = 'filter-btn px-3 py-1.5 rounded-lg text-sm border bg-blue-100 text-blue-700 border-blue-200';
+            renderJobs();
+        }
+
+        function renderJobs() {
+            const filtered = getFilteredJobs();
+            const tbody = document.getElementById('jobs-table-body');
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No jobs found. Use the chat to search for jobs.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map((job, i) => {
+                const score = job.ats_score || 0;
+                const scoreClass = score >= 70 ? 'ats-high' : score >= 40 ? 'ats-mid' : 'ats-low';
+                const sourceClass = (job.source || '').toLowerCase();
+                const isApplied = job.status === 'applied';
+
+                return `<tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 text-gray-500">${i + 1}</td>
+                    <td class="px-4 py-3 font-medium">${job.title}</td>
+                    <td class="px-4 py-3">${job.company || '-'}</td>
+                    <td class="px-4 py-3 text-gray-500">${job.location || '-'}</td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-xs font-medium ${
+                            sourceClass === 'indeed' ? 'bg-blue-100 text-blue-700' :
+                            sourceClass === 'naukri' ? 'bg-orange-100 text-orange-700' :
+                            sourceClass === 'linkedin' ? 'bg-sky-100 text-sky-700' :
+                            sourceClass === 'foundit' ? 'bg-purple-100 text-purple-700' :
+                            sourceClass === 'glassdoor' ? 'bg-green-100 text-green-700' :
+                            'bg-gray-100 text-gray-700'
+                        }">${job.source}</span>
+                    </td>
+                    <td class="px-4 py-3">
+                        <div class="flex items-center gap-2">
+                            <div class="w-16 bg-gray-200 rounded-full h-2">
+                                <div class="${scoreClass} h-2 rounded-full" style="width:${score}%"></div>
+                            </div>
+                            <span class="text-xs font-medium ${score >= 70 ? 'text-green-600' : score >= 40 ? 'text-yellow-600' : 'text-red-600'}">${score.toFixed(0)}%</span>
+                        </div>
+                    </td>
+                    <td class="px-4 py-3">
+                        ${isApplied
+                            ? '<span class="text-green-600 text-xs font-medium">Applied</span>'
+                            : '<span class="text-orange-500 text-xs">Pending</span>'}
+                        ${job.fresher_friendly ? '<span class="ml-1 text-purple-600 text-xs">Fresher</span>' : ''}
+                    </td>
+                    <td class="px-4 py-3">
+                        <div class="flex gap-1">
+                            ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" class="px-2 py-1 text-xs border rounded hover:bg-gray-50">Open</a>` : ''}
+                            ${!isApplied ? `<button onclick="markApplied(${job.id})" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">Mark Applied</button>` : ''}
+                        </div>
+                    </td>
+                </tr>`;
+            }).join('');
+        }
+
+        async function markApplied(jobId) {
+            try {
+                await fetch(`${API}/saved-jobs/apply/${jobId}`, { method: 'POST' });
+                await loadJobs();
+            } catch(e) { console.error(e); }
+        }
+
+        async function applyAll() {
+            const pending = allJobs.filter(j => j.status !== 'applied');
+            if (pending.length === 0) { alert('No pending jobs'); return; }
+
+            for (const job of pending.slice(0, 10)) {
+                if (job.apply_url) window.open(job.apply_url, '_blank');
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
+
+        function exportCSV() {
+            let csv = 'Title,Company,Location,Source,ATS Score,Status,Apply URL\n';
+            allJobs.forEach(j => {
+                csv += `"${j.title}","${j.company || ''}","${j.location || ''}","${j.source}","${j.ats_score || 0}%","${j.status}","${j.apply_url || ''}"\n`;
+            });
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = 'saved_jobs.csv'; a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        loadJobs();
+    </script>
+</body>
+</html>
