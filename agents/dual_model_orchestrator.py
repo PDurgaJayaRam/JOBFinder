@@ -221,30 +221,24 @@ Return ONLY the JSON array, no explanation:
         # Fallback: simple keyword generation
         keywords = list(user_keywords)
         if is_fresher:
-            keywords.extend(["Software Developer Fresher", "Junior Developer", "Entry Level Developer"])
+            keywords.extend(["Software Developer Fresher", "Junior Developer", "Entry Level Developer", "Software Intern", "Trainee Developer"])
         else:
             keywords.extend(["Software Developer", "Software Engineer", "Backend Developer"])
         return keywords[:8]
 
-    def _build_search_url(self, keyword: str, location: str, portal: str = "naukri", is_fresher: bool = False) -> str:
-        """Build direct search URL for a portal with experience-aware filtering."""
+    def _build_search_url(self, keyword: str, location: str, portal: str = "naukri") -> str:
+        """Build direct search URL for a portal. Experience filtering is done post-scrape."""
         kw = keyword.replace(" ", "%20")
         loc = location.replace(" ", "%20")
         kw_dash = keyword.replace(" ", "-")
         loc_dash = location.replace(" ", "-")
 
         if portal == "naukri":
-            if is_fresher:
-                return f"https://www.naukri.com/{kw_dash}-fresher-jobs-in-{loc_dash}"
             return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "indeed":
-            # NOTE: &explvl=entry_level triggers Cloudflare 403 — removed
             return f"https://in.indeed.com/jobs?q={kw}&l={loc}"
         elif portal == "linkedin":
-            url = f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
-            if is_fresher:
-                url += "&f_E=1"
-            return url
+            return f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
         elif portal == "cutshort":
             return f"https://cutshort.io/jobs?q={kw}&location={loc}"
         elif portal == "foundit":
@@ -254,7 +248,6 @@ Return ONLY the JSON array, no explanation:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "glassdoor":
-            # NOTE: ?experienceLevel=entryLevel triggers Cloudflare 403 — removed
             return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
@@ -324,7 +317,7 @@ Return ONLY the JSON array, no explanation:
     async def _search_keyword(self, keyword: str, location: str, portal: str = "naukri", profile: Dict = None, experience_setting: str = "fresher") -> List[Dict]:
         """Execute search for one keyword on one portal."""
         is_fresher = (experience_setting == "fresher")
-        url = self._build_search_url(keyword, location, portal, is_fresher=is_fresher)
+        url = self._build_search_url(keyword, location, portal)
         self._log(f"search_{portal}", "navigating", f"Searching '{keyword}' in {location}")
         self._log(f"search_{portal}", "url", url)
 

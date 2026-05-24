@@ -6,13 +6,14 @@ Architecture:
   DOM Extraction = Fast data extraction (job details from HTML)
 
 Efficient Flow:
-  1. Brain creates plan (keywords, experience level, portals)
+  1. Brain creates plan (keywords, portals)
   2. Navigate to portal, search with keywords
-  3. Mistral clicks experience filter (0 years/fresher)
+  3. Close popups, check listings visible
   4. DOM extracts job listings (fast, no API cost)
-  5. Mistral clicks on each job to open details
+  5. Open detail pages for enrichment
   6. DOM extracts full job details from detail page
-  7. Repeat for next portal
+  7. Post-scrape filter: reject non-tech, senior roles, wrong location
+  8. Repeat for next portal
 """
 import json
 import re
@@ -91,198 +92,6 @@ Respond with ONLY a JSON object:
                 return True
             except:
                 continue
-        return False
-
-    async def _select_experience_filter(self, portal: str, experience: str) -> bool:
-        """Select experience filter using DOM analysis - find filter elements in HTML."""
-        self._log(f"Selecting experience filter on {portal}")
-
-        # Use JavaScript to find and click experience filter
-        result = await self.browser.page.evaluate("""() => {
-            const results = {clicked: false, method: '', details: ''};
-
-            // Find all elements that might be experience filters
-            const allElements = document.querySelectorAll('*');
-            const experienceElements = [];
-
-            for (const el of allElements) {
-                const text = (el.innerText || '').toLowerCase().trim();
-                const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-                const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
-                const name = (el.getAttribute('name') || '').toLowerCase();
-                const id = (el.id || '').toLowerCase();
-                const className = (el.className || '').toLowerCase();
-
-                // Check if element is related to experience
-                const isExperience = text.includes('experience') || ariaLabel.includes('experience') ||
-                                   placeholder.includes('experience') || name.includes('experience') ||
-                                   id.includes('experience') || className.includes('experience') ||
-                                   text.includes('exp ') || text.includes('exp.');
-
-                if (isExperience && el.offsetParent !== null) {
-                    experienceElements.push({
-                        tag: el.tagName,
-                        text: text.substring(0, 50),
-                        type: el.type || '',
-                        role: el.getAttribute('role') || '',
-                        className: className.substring(0, 100),
-                        isClickable: el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'SELECT' ||
-                                    el.getAttribute('role') === 'button' || el.onclick !== null ||
-                                    className.includes('btn') || className.includes('button') || className.includes('dropdown') || className.includes('select')
-                    });
-                }
-            }
-
-            // Try to click the most likely experience filter element
-            for (const el of experienceElements) {
-                if (el.isClickable) {
-                    // Find the actual element and click it
-                    const selector = el.tag.toLowerCase() +
-                        (el.text ? `:contains("${el.text.substring(0, 20)}")` : '');
-
-                    // Try to click using different methods
-                    try {
-                        // Method 1: Find by text content
-                        const elements = document.querySelectorAll('*');
-                        for (const elem of elements) {
-                            if (elem.innerText && elem.innerText.toLowerCase().includes('experience') &&
-                                elem.offsetParent !== null &&
-                                (elem.tagName === 'BUTTON' || elem.tagName === 'DIV' || elem.tagName === 'SPAN' ||
-                                 elem.tagName === 'A' || elem.tagName === 'LABEL')) {
-                                elem.click();
-                                results.clicked = true;
-                                results.method = 'text click';
-                                results.details = `Clicked: ${elem.tagName} with text "${elem.innerText.substring(0, 30)}"`;
-                                return results;
-                            }
-                        }
-                    } catch(e) {}
-                }
-            }
-
-            // If no clickable element found, try dropdowns/selects
-            const selects = document.querySelectorAll('select');
-            for (const select of selects) {
-                const options = select.querySelectorAll('option');
-                for (const option of options) {
-                    if (option.text.toLowerCase().includes('experience') ||
-                        option.value.toLowerCase().includes('experience')) {
-                        select.value = option.value;
-                        select.dispatchEvent(new Event('change', {bubbles: true}));
-                        results.clicked = true;
-                        results.method = 'select change';
-                        results.details = `Selected: ${option.text}`;
-                        return results;
-                    }
-                }
-            }
-
-            results.details = `Found ${experienceElements.length} experience elements`;
-            return results;
-        }""")
-
-        self._log(f"Filter result: {result}")
-
-        if result.get("clicked"):
-            await self.browser.wait(2)
-
-            # Now try to select "Fresher" or "0-1 years"
-            fresher_selected = await self.browser.page.evaluate("""() => {
-                const results = {selected: false, method: '', details: ''};
-
-                // Look for fresher/0-1 years options
-                const fresherTexts = ['fresher', '0-1', '0 - 1', 'entry level', 'entry-level', 'less than 1', '0 years', 'fresher/0-1'];
-
-                // Try clicking elements with fresher text
-                const allElements = document.querySelectorAll('*');
-                for (const el of allElements) {
-                    const text = (el.innerText || '').toLowerCase().trim();
-                    const value = (el.value || '').toLowerCase();
-
-                    if (fresherTexts.some(ft => text.includes(ft) || value.includes(ft))) {
-                        if (el.offsetParent !== null &&
-                            (el.tagName === 'LABEL' || el.tagName === 'SPAN' || el.tagName === 'DIV' ||
-                             el.tagName === 'LI' || el.tagName === 'A' || el.tagName === 'BUTTON' ||
-                             el.tagName === 'OPTION')) {
-                            el.click();
-                            results.selected = true;
-                            results.method = 'click';
-                            results.details = `Clicked: ${el.tagName} with text "${text.substring(0, 30)}"`;
-                            return results;
-                        }
-                    }
-                }
-
-                // Try checkbox/radio inputs
-                const inputs = document.querySelectorAll('input[type="checkbox"], input[type="radio"]');
-                for (const input of inputs) {
-                    const label = input.labels?.[0]?.innerText?.toLowerCase() || '';
-                    const value = input.value.toLowerCase();
-
-                    if (fresherTexts.some(ft => label.includes(ft) || value.includes(ft))) {
-                        input.click();
-                        results.selected = true;
-                        results.method = 'input click';
-                        results.details = `Clicked input: ${label || value}`;
-                        return results;
-                    }
-                }
-
-                results.details = 'No fresher option found';
-                return results;
-            }""")
-
-            self._log(f"Fresher selection: {fresher_selected}")
-
-            if fresher_selected.get("selected"):
-                self._log(f"Selected fresher option: {fresher_selected.get('details')}")
-                await self.browser.wait(1)
-                return True
-
-        # If DOM approach failed, try Playwright selectors
-        try:
-            # Common experience filter selectors
-            filter_selectors = [
-                "text=Experience",
-                "text=experience",
-                "[aria-label*='experience' i]",
-                "[data-testid*='experience' i]",
-                "button:has-text('Experience')",
-                "div:has-text('Experience'):not(:has(div:has-text('Experience')))",
-            ]
-
-            for selector in filter_selectors:
-                try:
-                    await self.browser.page.click(selector, timeout=2000)
-                    self._log(f"Clicked filter via Playwright: {selector}")
-                    await self.browser.wait(1)
-
-                    # Try to select fresher option
-                    fresher_selectors = [
-                        "text=Fresher",
-                        "text=0-1 Yrs",
-                        "text=Entry Level",
-                        "text=0 Years",
-                        "text=Less than 1 year",
-                        "text=0-1 years",
-                    ]
-
-                    for option in fresher_selectors:
-                        try:
-                            await self.browser.page.click(option, timeout=1500)
-                            self._log(f"Selected option via Playwright: {option}")
-                            await self.browser.wait(1)
-                            return True
-                        except:
-                            continue
-
-                except:
-                    continue
-
-        except Exception as e:
-            self._log(f"Playwright filter error: {e}")
-
-        self._log("Could not apply experience filter via DOM or Playwright")
         return False
 
     async def _extract_jobs_from_listing(self) -> List[Dict]:
@@ -594,7 +403,7 @@ Respond with ONLY a JSON object:
 
                     try:
                         portal_jobs = await asyncio.wait_for(
-                            self._search_single_portal(portal, kw, location, is_fresher, raw_target - len(all_jobs), seen_urls),
+                            self._search_single_portal(portal, kw, location, raw_target - len(all_jobs), seen_urls),
                             timeout=90,  # 90 seconds per portal max
                         )
                         all_jobs.extend(portal_jobs)
@@ -631,7 +440,7 @@ Respond with ONLY a JSON object:
         return filtered_jobs
 
     async def _search_single_portal(self, portal: str, keywords: str, location: str,
-                                     is_fresher: bool, remaining: int, seen_urls: set) -> List[Dict]:
+                                     remaining: int, seen_urls: set) -> List[Dict]:
         """Search a single portal with caching, network interception, and retry."""
         import time as _time
 
@@ -646,7 +455,7 @@ Respond with ONLY a JSON object:
         is_healthy = self.browser.is_portal_healthy(portal)
         max_retries = 2 if is_healthy else 0
 
-        search_url = self._build_search_url(portal, keywords, location, is_fresher=is_fresher)
+        search_url = self._build_search_url(portal, keywords, location)
         all_portal_jobs = []
 
         for attempt in range(max_retries + 1):
@@ -666,7 +475,7 @@ Respond with ONLY a JSON object:
                 continue
 
             # Vision-guided navigation (popup dismissal + experience filter)
-            await self._vision_navigate(portal, is_fresher, keywords)
+            await self._vision_navigate(portal, keywords)
 
             # Check for LinkedIn login wall — try to dismiss it first
             if portal == "linkedin":
@@ -880,12 +689,17 @@ Respond with ONLY a JSON object:
                     if exp_before and int(exp_before.group(1)) > 2:
                         continue
 
-                    # Pattern: "minimum X years" or "min X yrs"
-                    min_exp_desc = re.search(r'min(?:imum)?\s*(\d+)\s*(?:years?|yrs?)', desc)
+                    # Pattern: "minimum X years" or "min X yrs" or "at least X years"
+                    min_exp_desc = re.search(r'(?:min(?:imum)?|at\s*least)\s*(\d+)\s*(?:years?|yrs?)', desc)
                     if min_exp_desc and int(min_exp_desc.group(1)) > 2:
                         continue
 
-                    # Pattern: "3+ yrs" anywhere in first 500 chars of description
+                    # Pattern: "3 to 5 years" or "3 to 5 yrs"
+                    range_to = re.search(r'(\d+)\s+to\s+\d+\s*(?:years?|yrs?)', desc[:500])
+                    if range_to and int(range_to.group(1)) > 2:
+                        continue
+
+                    # Pattern: "3+ yrs" or "3 yrs experience" anywhere in first 500 chars of description
                     quick_exp = re.search(r'(\d+)\+?\s*(?:years?|yrs?)', desc[:500])
                     if quick_exp and int(quick_exp.group(1)) > 2:
                         continue
@@ -937,9 +751,9 @@ Respond with ONLY a JSON object:
             self._log(f"LinkedIn block check failed: {e}")
         return False
 
-    async def _vision_navigate(self, portal: str, is_fresher: bool, keywords: str) -> bool:
-        """Navigate portal page: close popups, apply experience filters.
-        Uses fast DOM methods first. Only calls vision model if DOM fails."""
+    async def _vision_navigate(self, portal: str, keywords: str) -> bool:
+        """Navigate portal page: close popups, check listings visible.
+        Experience filtering is done post-scrape by _filter_jobs()."""
         # Always try fast DOM popup closing first (~1 second)
         await self._close_popups()
 
@@ -958,12 +772,11 @@ Respond with ONLY a JSON object:
             }""")
             self._log(f"Page has {has_listings} job links")
             if has_listings >= 3:
-                # Page looks good, skip vision
                 return True
         except:
             pass
 
-        # Page looks broken or no results visible — try vision model
+        # Page looks broken or no results visible — try vision model (popup close only)
         try:
             import os
             mistral_key = os.getenv("MISTRAL_API_KEY")
@@ -974,11 +787,7 @@ Respond with ONLY a JSON object:
             from agents.vision_scraper.ui_tars_agent import UITarsAgent
             agent = UITarsAgent(self.browser, mistral_key, max_steps=3)
 
-            task_parts = ["If you see a popup or overlay blocking the page, close it."]
-            if is_fresher:
-                task_parts.append("If you see experience filter options, select 'Fresher' or 'Entry Level'.")
-            task_parts.append("If job listings are visible, say finished.")
-            task = " ".join(task_parts)
+            task = "If you see a popup or overlay blocking the page, close it. If job listings are visible, say finished."
 
             self._log(f"Using vision for {portal}...")
             result = await agent.run(task)
@@ -990,41 +799,26 @@ Respond with ONLY a JSON object:
             self._log(f"Vision failed: {e}")
             return False
 
-    def _build_search_url(self, portal: str, keywords: str, location: str, is_fresher: bool = False) -> str:
-        """Build search URL for a portal with experience-aware filtering."""
+    def _build_search_url(self, portal: str, keywords: str, location: str) -> str:
+        """Build search URL for a portal. Experience filtering is done post-scrape by _filter_jobs()."""
         kw = keywords.split(",")[0].strip().replace(" ", "%20")
         loc = location.replace(" ", "%20")
         kw_dash = kw.replace("%20", "-")
         loc_dash = loc.replace("%20", "-")
 
         if portal == "naukri":
-            # Naukri natively supports {kw}-fresher-jobs-in-{loc} pattern
-            if is_fresher:
-                return f"https://www.naukri.com/{kw_dash}-fresher-jobs-in-{loc_dash}"
             return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "indeed":
-            # NOTE: &explvl=entry_level triggers Cloudflare 403 — removed. Listing-first extraction + _filter_jobs() handles experience filtering.
             return f"https://in.indeed.com/jobs?q={kw}&l={loc}"
         elif portal == "linkedin":
-            url = f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
-            if is_fresher:
-                url += "&f_E=1"  # Entry level experience filter
-            return url
+            return f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
         elif portal == "glassdoor":
-            # NOTE: ?experienceLevel=entryLevel triggers Cloudflare 403 — removed. Listing-first extraction + _filter_jobs() handles experience filtering.
             return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm"
         elif portal == "timesjobs":
-            url = f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
-            if is_fresher:
-                url += "&cboExp=0"  # 0 = fresher (verified: timesjobs uses cboExp, not experience)
-            return url
+            return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
         elif portal == "shine":
-            url = f"https://www.shine.com/job-search/{kw_dash}-fresher-jobs-in-{loc_dash}" if is_fresher else f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
-            return url
+            return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":
-            url = f"https://www.foundit.in/srp/results?query={kw}&location={loc}"
-            if is_fresher:
-                url += "&experience=0"  # 0 years
-            return url
+            return f"https://www.foundit.in/srp/results?query={kw}&location={loc}"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
