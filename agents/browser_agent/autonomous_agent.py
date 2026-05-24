@@ -107,11 +107,23 @@ Respond with ONLY a JSON object:
         return []
 
     async def _open_job_and_extract(self, job_url: str) -> Dict:
-        """Open a job page and extract details using DOM (fast)."""
+        """Open a job page and extract details using DOM (fast). Skips Cloudflare-blocked URLs."""
+        # Skip known Cloudflare-blocked portals (detail pages cause redirect loops)
+        if "glassdoor.co.in" in job_url or "glassdoor.com" in job_url:
+            return {}
+
+        new_page = None
         try:
-            # Open in new tab
             new_page = await self.browser.context.new_page()
-            await new_page.goto(job_url, wait_until='domcontentloaded', timeout=15000)
+            # Use networkidle to detect Cloudflare redirect loops early
+            await new_page.goto(job_url, wait_until='domcontentloaded', timeout=12000)
+
+            # Check if we landed on a Cloudflare challenge page
+            page_url = new_page.url
+            if "challenge" in page_url or "cdn-cgi" in page_url:
+                await new_page.close()
+                return {}
+
             await asyncio.sleep(1.5)
 
             # Extract using DOM — multi-strategy for all portals
@@ -223,6 +235,7 @@ Respond with ONLY a JSON object:
             }""")
 
             await new_page.close()
+            new_page = None
 
             if job_data and job_data.get("title"):
                 self._log(f"Extracted job: {job_data.get('title', 'Unknown')}")
@@ -230,6 +243,12 @@ Respond with ONLY a JSON object:
 
         except Exception as e:
             self._log(f"Job detail extraction error: {e}")
+        finally:
+            if new_page:
+                try:
+                    await new_page.close()
+                except:
+                    pass
 
         return {}
 
@@ -592,7 +611,9 @@ Respond with ONLY a JSON object:
                         "qa", "test", "automation", "database", "sql", "api", "web",
                         "mobile", "app", "application", "iot", "embedded", "cyber", "security", "network",
                         "appian", "bpm", "sail", "consultant", "sde", "programmer",
-                        "data engineer", "data platform", "machine learning", "ai engineer"]
+                        "data engineer", "data platform", "machine learning", "ai engineer",
+                        "project coordinator", "project manager", "scrum master", "product owner",
+                        "analyst", "data", "reporting", "power bi", "tableau", "etl"]
 
         # Non-tech job patterns to reject
         non_tech_patterns = ["teacher", "chemist", "dental", "nurse", "accountant", "marketing", "sales",
@@ -643,19 +664,29 @@ Respond with ONLY a JSON object:
             if "salary search" in title or "salary search" in desc[:100]:
                 continue
 
+            # Skip DataAnnotation spam (same company, same template, different titles)
+            if "dataannotation" in company and "ai trainer" in title:
+                continue
+
+            # Skip Help Us Protect Glassdoor
+            if "help us protect glassdoor" in title:
+                continue
+
             # Skip non-tech jobs
             if any(pattern in title for pattern in non_tech_patterns):
                 continue
 
-            # Require at least one tech keyword in the TITLE
+            # Require at least one tech keyword in the TITLE, OR user's search keyword
             has_tech_keyword = any(kw in title for kw in tech_keywords)
+            user_keyword_list = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+            has_user_keyword = any(kw in title or kw in combined for kw in user_keyword_list)
 
             # If "engineer" in title, require a tech qualifier (software engineer OK, civil engineer NOT)
             if "engineer" in title:
                 has_tech_qualifier = any(q in title for q in engineer_requires_tech)
                 if not has_tech_qualifier:
                     continue
-            elif not has_tech_keyword:
+            elif not has_tech_keyword and not has_user_keyword:
                 continue
 
             # Location filtering
