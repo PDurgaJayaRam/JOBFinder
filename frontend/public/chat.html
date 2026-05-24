@@ -508,7 +508,7 @@
                 </tr>`;
                 // Add description row
                 if (job.description && job.description.length > 0) {
-                    const desc = job.description.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    const desc = stripHtml(job.description);
                     const descId = 'desc-' + i + '-' + Date.now();
                     html += `<tr><td colspan="8" class="job-desc-row">
                         <div class="desc-text" id="${descId}">${desc}</div>
@@ -531,6 +531,17 @@
             if (!el) return;
             const expanded = el.classList.toggle('expanded');
             btn.textContent = expanded ? 'Show less' : 'Show more';
+        }
+
+        function stripHtml(html) {
+            if (!html) return '';
+            // Use DOM parser to safely strip HTML tags
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            let text = tmp.textContent || tmp.innerText || '';
+            // Clean up excessive whitespace
+            text = text.replace(/\n{3,}/g, '\n\n').trim();
+            return text;
         }
 
         function formatText(text) {

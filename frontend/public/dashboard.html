@@ -203,7 +203,7 @@
                 </tr>`;
 
                 // Detail row with full description
-                const desc = (job.description || 'No description available').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const desc = stripHtml(job.description || 'No description available');
                 const skills = job.skills_required || '';
                 const matchedSkills = job.ai_analysis ? (JSON.parse(job.ai_analysis).matched_skills || []).join(', ') : '';
                 const detailRow = `<tr class="detail-row" id="detail-${job.id}">
@@ -257,6 +257,15 @@
             const a = document.createElement('a');
             a.href = url; a.download = 'saved_jobs.csv'; a.click();
             URL.revokeObjectURL(url);
+        }
+
+        function stripHtml(html) {
+            if (!html) return '';
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            let text = tmp.textContent || tmp.innerText || '';
+            text = text.replace(/\n{3,}/g, '\n\n').trim();
+            return text;
         }
 
         loadJobs();
