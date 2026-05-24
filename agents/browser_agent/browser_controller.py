@@ -42,6 +42,8 @@ class BrowserController:
         self.context: BrowserContext = None
         self.page: Page = None
         self._action_log = []
+        self._network_responses = []
+        self._extraction_stats = {}  # {portal: {attempts, jobs, zeros, last_zero}}
 
     async def start(self):
         """Launch browser with stealth. Uses CloakBrowser if available, falls back to raw Playwright."""
@@ -71,18 +73,171 @@ class BrowserController:
             )
             logger.info("Raw Playwright launched OK")
 
+        # Randomize viewport, user-agent, and locale per session
+        import random
+        width = random.randint(1200, 1600)
+        height = random.randint(800, 1000)
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ]
+        locales = ["en-US", "en-GB", "en-IN"]
+        accept_languages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-IN,en;q=0.9,en-IN;q=0.8"]
+
         self.context = await self.browser.new_context(
-            viewport={"width": 1400, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="en-US",
+            viewport={"width": width, "height": height},
+            user_agent=random.choice(user_agents),
+            locale=random.choice(locales),
             timezone_id="Asia/Kolkata",
+            extra_http_headers={"Accept-Language": random.choice(accept_languages)},
         )
         self.page = await self.context.new_page()
 
+        # Network response interception — capture API responses for job data
+        self._network_responses = []
+        self.page.on("response", self._on_response)
+
+    def _on_response(self, response):
+        """Callback for every network response. Stores responses for later parsing."""
+        try:
+            url = response.url
+            content_type = response.headers.get("content-type", "")
+            status = response.status
+            if status != 200:
+                return
+            if "json" not in content_type and "javascript" not in content_type:
+                return
+            # Only capture responses that look like job search APIs
+            api_patterns = [
+                "/api/", "/jobapi/", "/searchapi/", "/rpc/", "/gql",
+                "search", "jobs", "results", "listing",
+            ]
+            if any(p in url.lower() for p in api_patterns):
+                self._network_responses.append(response)
+        except Exception:
+            pass
+
+    def clear_intercepted(self):
+        """Clear intercepted responses before navigating to a new page."""
+        self._network_responses.clear()
+
+    async def get_intercepted_jobs(self, portal: str) -> List[Dict[str, Any]]:
+        """Parse intercepted network responses for job data."""
+        if not self._network_responses:
+            return []
+
+        portal_domains = {
+            "naukri": ["naukri.com"],
+            "indeed": ["indeed.com", "indeed.co"],
+            "linkedin": ["linkedin.com"],
+            "shine": ["shine.com"],
+            "glassdoor": ["glassdoor."],
+            "foundit": ["foundit.in"],
+            "timesjobs": ["timesjobs.com"],
+        }
+        domains = portal_domains.get(portal, [portal])
+        relevant = [r for r in self._network_responses if any(d in r.url for d in domains)]
+
+        for resp in reversed(relevant):
+            try:
+                body = await resp.json()
+                jobs = self._extract_jobs_from_json(body, portal)
+                if jobs:
+                    return jobs
+            except Exception:
+                continue
+
+        return []
+
+    def _extract_jobs_from_json(self, data: Any, portal: str) -> List[Dict]:
+        """Recursively search JSON response for job-like objects."""
+        jobs = []
+
+        if isinstance(data, dict):
+            # Check if this dict looks like a job
+            if self._is_job_object(data):
+                jobs.append(self._normalize_job(data, portal))
+            # Check common API response wrappers
+            for key in ["jobs", "results", "data", "items", "listings", "positions",
+                        "jobList", "jobResults", "searchResults", "content"]:
+                if key in data:
+                    nested = data[key]
+                    if isinstance(nested, list):
+                        for item in nested:
+                            if isinstance(item, dict) and self._is_job_object(item):
+                                jobs.append(self._normalize_job(item, portal))
+                            elif isinstance(item, dict):
+                                jobs.extend(self._extract_jobs_from_json(item, portal))
+                    elif isinstance(nested, dict):
+                        jobs.extend(self._extract_jobs_from_json(nested, portal))
+            # Recurse into unknown dict values
+            if not jobs:
+                for val in data.values():
+                    if isinstance(val, (dict, list)):
+                        jobs.extend(self._extract_jobs_from_json(val, portal))
+                        if jobs:
+                            break
+
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and self._is_job_object(item):
+                    jobs.append(self._normalize_job(item, portal))
+                elif isinstance(item, dict):
+                    jobs.extend(self._extract_jobs_from_json(item, portal))
+
+        return jobs[:50]  # Cap at 50
+
+    def _is_job_object(self, obj: dict) -> bool:
+        """Check if a dict looks like a job listing."""
+        keys = set(obj.keys())
+        job_keys = {"title", "jobTitle", "job_title", "position", "designation",
+                     "company", "companyName", "company_name", "employer",
+                     "location", "jobLocation", "job_location"}
+        matches = keys & job_keys
+        return len(matches) >= 1  # At least title or company
+
+    def _normalize_job(self, obj: dict, portal: str) -> Dict:
+        """Normalize a JSON job object to our standard format."""
+        title = (obj.get("title") or obj.get("jobTitle") or obj.get("job_title")
+                 or obj.get("position") or obj.get("designation") or "")
+        company = (obj.get("company") or obj.get("companyName") or obj.get("company_name")
+                   or obj.get("employer") or "Unknown")
+        location = (obj.get("location") or obj.get("jobLocation") or obj.get("job_location")
+                    or obj.get("city") or "Not specified")
+        desc = (obj.get("description") or obj.get("jobDescription") or obj.get("job_description")
+                or obj.get("snippet") or "")
+        url = (obj.get("url") or obj.get("jobUrl") or obj.get("job_url")
+               or obj.get("applyUrl") or obj.get("apply_url") or obj.get("link") or "")
+        salary = (obj.get("salary") or obj.get("salaryRange") or obj.get("salary_range")
+                  or "Not specified")
+        exp = (obj.get("experience") or obj.get("experienceRequired")
+               or obj.get("experience_required") or "Not specified")
+
+        return {
+            "title": title.strip() if isinstance(title, str) else str(title),
+            "company": company.strip() if isinstance(company, str) else str(company),
+            "location": location.strip() if isinstance(location, str) else str(location),
+            "description": desc.strip() if isinstance(desc, str) else str(desc),
+            "source_url": url,
+            "apply_url": url,
+            "salary": str(salary),
+            "experience": str(exp),
+            "source": portal,
+            "extraction_method": "api_intercept",
+        }
+
     async def close(self):
-        """Close browser."""
+        """Close browser. Safe to call multiple times."""
         if self.browser:
-            await self.browser.close()
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
+            self.browser = None
+            self.context = None
+            self.page = None
 
     async def go_to(self, url: str, timeout: int = 30000) -> str:
         """Navigate to URL with retry logic."""
@@ -255,26 +410,54 @@ class BrowserController:
             elif 'shine.com' in url: source = 'shine'
 
             if source == 'naukri':
-                return await self._extract_naukri_jobs()
+                jobs = await self._extract_naukri_jobs()
             elif source == 'linkedin':
-                return await self._extract_linkedin_jobs()
+                jobs = await self._extract_linkedin_jobs()
             elif source == 'indeed':
-                return await self._extract_indeed_jobs()
+                jobs = await self._extract_indeed_jobs()
             elif source == 'cutshort':
-                return await self._extract_cutshort_jobs()
+                jobs = await self._extract_cutshort_jobs()
             elif source == 'foundit':
-                return await self._extract_foundit_jobs()
+                jobs = await self._extract_foundit_jobs()
             elif source == 'timesjobs':
-                return await self._extract_timesjobs_jobs()
+                jobs = await self._extract_timesjobs_jobs()
             elif source == 'shine':
-                return await self._extract_shine_jobs()
+                jobs = await self._extract_shine_jobs()
             elif source == 'glassdoor':
-                return await self._extract_glassdoor_jobs()
+                jobs = await self._extract_glassdoor_jobs()
+            else:
+                jobs = await self._extract_generic_jobs()
 
-            return await self._extract_generic_jobs()
+            self._record_extraction(source, len(jobs))
+            return jobs
         except Exception as e:
             print(f"Extract jobs error: {e}")
             return []
+
+    def _record_extraction(self, portal: str, count: int):
+        """Track extraction health per portal."""
+        import time
+        if portal not in self._extraction_stats:
+            self._extraction_stats[portal] = {"attempts": 0, "jobs": 0, "zeros": 0, "last_zero": 0}
+        stats = self._extraction_stats[portal]
+        stats["attempts"] += 1
+        stats["jobs"] += count
+        if count == 0:
+            stats["zeros"] += 1
+            stats["last_zero"] = time.time()
+
+    def is_portal_healthy(self, portal: str) -> bool:
+        """Check if a portal has been returning results. Returns False if >5 zeros in last 10 attempts."""
+        stats = self._extraction_stats.get(portal)
+        if not stats:
+            return True  # No data yet, assume healthy
+        if stats["attempts"] < 5:
+            return True  # Not enough data
+        return stats["zeros"] <= 5
+
+    def get_portal_health(self) -> Dict:
+        """Return extraction stats for all portals."""
+        return dict(self._extraction_stats)
 
     async def _extract_naukri_jobs(self) -> List[Dict[str, Any]]:
         """Extract Naukri jobs - only individual job detail pages, no category/nav links."""
@@ -575,12 +758,11 @@ class BrowserController:
 
     async def _extract_shine_jobs(self) -> List[Dict[str, Any]]:
         """Extract Shine jobs - uses /job-details/ or /job/<id> pattern."""
-        # Try specific patterns first
+        # Try specific patterns first — /job-search/ removed (matches category pages, not actual jobs)
         jobs = await self._extract_with_patterns([
             r'/job-details/',
             r'/job/\d+',
             r'/jobs/\d+',
-            r'/job-search/',
         ], 'shine')
 
         # If no jobs found, try generic extraction as fallback
@@ -697,13 +879,20 @@ class BrowserController:
                 // Title must look like a job title
                 if (text.length < 4 || text.length > 150) continue;
                 const skipKeywords = ['view all', 'see all', 'search', 'login', 'register',
-                    'download', 'apply with', 'post job', 'recruiter', 'talent cloud'];
+                    'download', 'apply with', 'post job', 'recruiter', 'talent cloud',
+                    'salary', 'salaries', 'salary search', 'jobs in', 'job search',
+                    'view all jobs', 'see all jobs', 'skip to main'];
                 const lowerText = text.toLowerCase();
                 if (skipKeywords.some(kw => lowerText.includes(kw))) continue;
 
-                // Reject category/suggestion links like "2d Animation Jobs In Chennai"
+                // Reject category/suggestion links like "2d Animation Jobs In Chennai" or "SQL jobs in Hyderabad"
                 if (lowerText.match(/jobs\\s+in\\s+\\w+/i)) continue;
                 if (lowerText.match(/^[\\w\\s]+\\s+jobs\\s+in\\s+/i)) continue;
+                if (lowerText.match(/\\d+[,.]?\\d*\\s+(fresher|data entry|work from home)/i)) continue;
+
+                // Reject pages that are clearly not job listings (error pages, nav items)
+                if (text === '404' || text === '403' || text === '500') continue;
+                if (lowerText.match(/^(home|about|contact|help|faq|privacy|terms|blog)$/i)) continue;
 
                 const jobKeywords = ['developer', 'engineer', 'analyst', 'manager', 'consultant',
                     'architect', 'specialist', 'designer', 'lead', 'senior', 'junior',

@@ -226,19 +226,25 @@ Return ONLY the JSON array, no explanation:
             keywords.extend(["Software Developer", "Software Engineer", "Backend Developer"])
         return keywords[:8]
 
-    def _build_search_url(self, keyword: str, location: str, portal: str = "naukri") -> str:
-        """Build direct search URL for a portal."""
+    def _build_search_url(self, keyword: str, location: str, portal: str = "naukri", is_fresher: bool = False) -> str:
+        """Build direct search URL for a portal with experience-aware filtering."""
         kw = keyword.replace(" ", "%20")
         loc = location.replace(" ", "%20")
         kw_dash = keyword.replace(" ", "-")
         loc_dash = location.replace(" ", "-")
 
         if portal == "naukri":
+            if is_fresher:
+                return f"https://www.naukri.com/{kw_dash}-fresher-jobs-in-{loc_dash}"
             return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "indeed":
+            # NOTE: &explvl=entry_level triggers Cloudflare 403 — removed
             return f"https://in.indeed.com/jobs?q={kw}&l={loc}"
         elif portal == "linkedin":
-            return f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
+            url = f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
+            if is_fresher:
+                url += "&f_E=1"
+            return url
         elif portal == "cutshort":
             return f"https://cutshort.io/jobs?q={kw}&location={loc}"
         elif portal == "foundit":
@@ -248,7 +254,8 @@ Return ONLY the JSON array, no explanation:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "glassdoor":
-            return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}_IP{len(loc_dash)+1}KO{len(loc_dash)+2},{len(loc_dash)+2+len(kw_dash)}.htm"
+            # NOTE: ?experienceLevel=entryLevel triggers Cloudflare 403 — removed
+            return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
 
@@ -316,7 +323,8 @@ Return ONLY the JSON array, no explanation:
 
     async def _search_keyword(self, keyword: str, location: str, portal: str = "naukri", profile: Dict = None, experience_setting: str = "fresher") -> List[Dict]:
         """Execute search for one keyword on one portal."""
-        url = self._build_search_url(keyword, location, portal)
+        is_fresher = (experience_setting == "fresher")
+        url = self._build_search_url(keyword, location, portal, is_fresher=is_fresher)
         self._log(f"search_{portal}", "navigating", f"Searching '{keyword}' in {location}")
         self._log(f"search_{portal}", "url", url)
 
@@ -601,7 +609,7 @@ Return ONLY the JSON array, no explanation:
         self._log("brain_planning", "keywords", f"Generated {len(keywords)} keywords: {', '.join(keywords[:5])}")
 
         # ─── Determine portals to search ────────────────────────────────
-        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit", "cutshort", "glassdoor"]
+        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit", "glassdoor"]
         if selected_portals:
             portal_order = [p for p in selected_portals if p in all_portals]
             if not portal_order:
@@ -616,35 +624,37 @@ Return ONLY the JSON array, no explanation:
 
         self._log("browser_init", "starting", "Starting autonomous agent...")
         agent = AutonomousAgent(headless=False)
+        all_raw_jobs = []
 
         try:
             # Combine keywords for the agent
             search_keywords = ", ".join(keywords[:5])
 
-            # Run autonomous search with overall timeout
-            all_raw_jobs = await asyncio.wait_for(
-                agent.run_task(
-                    task=f"Search for jobs matching: {search_keywords}",
-                    target_count=target_count,
-                    keywords=search_keywords,
-                    is_fresher=profile.get("is_fresher", True),
-                    location=location,
-                    portals=portal_order,
-                ),
-                timeout=300,  # 5 minute overall timeout
+            # Run autonomous search — per-portal timeouts are handled inside run_task()
+            all_raw_jobs = await agent.run_task(
+                task=f"Search for jobs matching: {search_keywords}",
+                target_count=target_count,
+                keywords=search_keywords,
+                is_fresher=profile.get("is_fresher", True),
+                location=location,
+                portals=portal_order,
+                overall_timeout=900,  # 15 minute overall budget (multiple keyword rounds)
             )
 
             self._log("agent_search", "complete", f"Autonomous agent found {len(all_raw_jobs)} jobs")
             round_num = len(portal_order)
 
-        except asyncio.TimeoutError:
-            self._log("agent_search", "error", "Autonomous agent timed out after 5 minutes")
-            all_raw_jobs = []
-            round_num = 0
         except Exception as e:
             self._log("agent_search", "error", f"Autonomous agent failed: {type(e).__name__}: {e}")
             all_raw_jobs = []
             round_num = 0
+        finally:
+            # Always clean up browser between searches
+            try:
+                if agent.browser and agent.browser.browser:
+                    await agent.browser.close()
+            except:
+                pass
 
         self._log("search_complete", "done", f"Total raw jobs: {len(all_raw_jobs)}")
 

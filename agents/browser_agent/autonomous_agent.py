@@ -305,7 +305,7 @@ Respond with ONLY a JSON object:
             await new_page.goto(job_url, wait_until='domcontentloaded', timeout=15000)
             await asyncio.sleep(1.5)
 
-            # Extract using DOM
+            # Extract using DOM — multi-strategy for all portals
             job_data = await new_page.evaluate("""() => {
                 const data = {
                     title: '',
@@ -319,33 +319,93 @@ Respond with ONLY a JSON object:
                     apply_url: window.location.href
                 };
 
-                // Get title
-                const titleEl = document.querySelector('h1, [class*="job-title"], [class*="jobTitle"], [data-testid="job-title"]');
-                if (titleEl) data.title = titleEl.innerText.trim();
+                // Get title — try multiple selectors
+                for (const sel of [
+                    'h1', '[class*="job-title"]', '[class*="jobTitle"]',
+                    '[data-testid="job-title"]', '[class*="jd-title"]',
+                    '.job-title', '#job-title'
+                ]) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 3) { data.title = el.innerText.trim(); break; }
+                }
 
                 // Get company
-                const companyEl = document.querySelector('[class*="company"], [class*="employer"], [data-testid="company-name"]');
-                if (companyEl) data.company = companyEl.innerText.trim();
+                for (const sel of [
+                    '[class*="company"]', '[class*="employer"]',
+                    '[data-testid="company-name"]', '[class*="companyName"]',
+                    'a[class*="company"]'
+                ]) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 1) { data.company = el.innerText.trim(); break; }
+                }
 
                 // Get location
-                const locationEl = document.querySelector('[class*="location"], [data-testid="location"]');
-                if (locationEl) data.location = locationEl.innerText.trim();
+                for (const sel of [
+                    '[class*="location"]', '[data-testid="location"]',
+                    '[class*="jobLocation"]'
+                ]) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 1) { data.location = el.innerText.trim(); break; }
+                }
 
-                // Get description
-                const descEl = document.querySelector('[class*="description"], [class*="job-description"], [class*="jobDescription"], [data-testid="job-description"]');
-                if (descEl) data.description = descEl.innerText.trim();
+                // Get description — try specific selectors first, then fallback to body
+                for (const sel of [
+                    '[class*="job-description"]', '[class*="jobDescription"]',
+                    '[class*="jd-desc"]', '[class*="description"]',
+                    '[data-testid="job-description"]',
+                    '[class*="jobDescription"]', '[class*="detail"]',
+                    'article', '[class*="content"]', 'main'
+                ]) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        const text = el.innerText.trim();
+                        if (text.length > 100) { data.description = text.substring(0, 3000); break; }
+                    }
+                }
+
+                // Fallback: grab all text from body if no description found
+                if (!data.description) {
+                    const body = document.body.innerText || '';
+                    // Look for job description section markers
+                    const markers = ['job description', 'job description', 'about the role', 'about the job',
+                        'what you will do', 'responsibilities', 'requirements', 'qualifications',
+                        'what we are looking for', 'role description', 'key responsibilities'];
+                    const lowerBody = body.toLowerCase();
+                    for (const marker of markers) {
+                        const idx = lowerBody.indexOf(marker);
+                        if (idx !== -1) {
+                            data.description = body.substring(idx, idx + 2000).trim();
+                            break;
+                        }
+                    }
+                    if (!data.description && body.length > 200) {
+                        data.description = body.substring(0, 1500).trim();
+                    }
+                }
 
                 // Get salary
-                const salaryEl = document.querySelector('[class*="salary"], [data-testid="salary"]');
-                if (salaryEl) data.salary = salaryEl.innerText.trim();
+                for (const sel of ['[class*="salary"]', '[data-testid="salary"]', '[class*="compensation"]']) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 1) { data.salary = el.innerText.trim(); break; }
+                }
 
-                // Get experience
-                const expEl = document.querySelector('[class*="experience"], [data-testid="experience"]');
-                if (expEl) data.experience = expEl.innerText.trim();
+                // Get experience — try selector, then parse from text
+                for (const sel of ['[class*="experience"]', '[data-testid="experience"]', '[class*="exp-required"]']) {
+                    const el = document.querySelector(sel);
+                    if (el && el.innerText.trim().length > 1) { data.experience = el.innerText.trim(); break; }
+                }
+                if (!data.experience) {
+                    const text = (data.description || document.body.innerText || '').substring(0, 1000);
+                    const expMatch = text.match(/(?:experience|exp)[\\s:.-]*(\\d+)[\\s-]*[-–]?[\\s]*(\\d+)?[\\s]*(?:years?|yrs?)/i)
+                        || text.match(/(\\d+)[\\s-]*[-–]?[\\s]*(\\d+)?[\\s]*(?:years?|yrs?)[\\s]*(?:of\\s*)?(?:experience|exp)/i);
+                    if (expMatch) data.experience = expMatch[0];
+                    const fresherMatch = text.match(/fresher|entry.?level|0[\s-]*[-–]?[\s]*1[\s]*(?:years?|yrs?)/i);
+                    if (fresherMatch && !data.experience) data.experience = fresherMatch[0];
+                }
 
                 // Extract skills from description
                 if (data.description) {
-                    const skillPatterns = /(?:java|python|javascript|react|angular|node|sql|html|css|aws|docker|git|spring|django|flask|fastapi|typescript|vue|mongodb|postgresql|redis|kubernetes)/gi;
+                    const skillPatterns = /(?:java|python|javascript|react|angular|node[\s.]?js|sql|html|css|aws|docker|git|spring[\s.]?boot|django|flask|fastapi|typescript|vue[\s.]?js|mongodb|postgresql|redis|kubernetes|hibernate|microservices|rest[\s.]?api|graphql|junit|selenium|jenkins|terraform)/gi;
                     const matches = data.description.match(skillPatterns);
                     if (matches) data.skills = [...new Set(matches.map(s => s.toLowerCase()))];
                 }
@@ -381,94 +441,188 @@ Respond with ONLY a JSON object:
 
         return all_jobs
 
+    async def _try_dom_pagination(self) -> bool:
+        """Try to click 'Next' or page 2 via DOM selectors. Returns True if successful."""
+        next_selectors = [
+            "a:has-text('Next')", "a:has-text('next')", "button:has-text('Next')",
+            "a[aria-label='Next']", "a[aria-label='next']",
+            "a:has-text('»')", "a:has-text('>')",
+            "a.pagination-next", "li.next a", "a[data-automation='pagination-next']",
+            "button[aria-label='Next page']",
+        ]
+        for selector in next_selectors:
+            try:
+                el = self.browser.page.locator(selector).first
+                if await el.is_visible(timeout=2000):
+                    await el.click()
+                    await self.browser.wait(3)
+                    self._log(f"Clicked next page via DOM: {selector}")
+                    return True
+            except:
+                continue
+        return False
+
+    async def _paginate_and_extract(self, portal: str, max_pages: int = 3) -> List[Dict]:
+        """Extract jobs from current page, then paginate and extract more.
+        Uses DOM for extraction, tries DOM-first for pagination, falls back to vision."""
+        all_jobs = []
+
+        for page_num in range(1, max_pages + 1):
+            self._log(f"Extracting page {page_num}...")
+
+            # Extract jobs from current page
+            page_jobs = await self._scroll_and_extract(max_scrolls=3)
+            for job in page_jobs:
+                if not any(j.get("title") == job.get("title") and j.get("company") == job.get("company") for j in all_jobs):
+                    all_jobs.append(job)
+            self._log(f"Page {page_num}: {len(page_jobs)} jobs (total: {len(all_jobs)})")
+
+            if page_num >= max_pages:
+                break
+
+            # Try DOM-based pagination first (fast, no API cost)
+            prev_url = self.browser.page.url
+            dom_success = await self._try_dom_pagination()
+
+            if dom_success:
+                # Check if URL changed or new content loaded
+                new_url = self.browser.page.url
+                if new_url != prev_url:
+                    self._log(f"DOM pagination worked, new URL: {new_url[:80]}")
+                    await self.browser.wait(2)
+                    continue
+                # URL didn't change — might have loaded content dynamically
+                await self.browser.wait(2)
+                continue
+
+            # DOM pagination failed — try vision
+            self._log("DOM pagination failed, trying vision...")
+            try:
+                import os
+                mistral_key = os.getenv("MISTRAL_API_KEY")
+                if not mistral_key:
+                    self._log("No MISTRAL_API_KEY, stopping pagination")
+                    break
+
+                from agents.vision_scraper.ui_tars_agent import UITarsAgent
+                agent = UITarsAgent(self.browser, mistral_key, max_steps=2)
+                result = await agent.run(
+                    "Look at the page. If there is a 'Next' button, 'Load More' button, or pagination links "
+                    "(like page numbers 2, 3, etc.), click the Next button or page 2 link to go to the next page. "
+                    "If there is no way to go to the next page, say finished()."
+                )
+                status = result.get("status", "unknown")
+                self._log(f"Vision pagination result: {status}")
+
+                if status in ("success", "finished"):
+                    new_url = self.browser.page.url
+                    if new_url != prev_url:
+                        self._log(f"Vision pagination worked, new URL: {new_url[:80]}")
+                        await self.browser.wait(2)
+                        continue
+                    else:
+                        self._log("Vision tried but URL unchanged, stopping pagination")
+                        break
+                else:
+                    self._log("Vision pagination failed, stopping")
+                    break
+
+            except Exception as e:
+                self._log(f"Vision pagination error: {e}")
+                break
+
+        return all_jobs
+
     async def run_task(self, task: str, target_count: int = 20, keywords: str = "",
                        is_fresher: bool = False, location: str = "Hyderabad",
-                       portals: List[str] = None, is_us: bool = False) -> List[Dict]:
+                       portals: List[str] = None, is_us: bool = False,
+                       overall_timeout: int = 600) -> List[Dict]:
         """Run efficient job search using Mistral for UI, DOM for data."""
         self._log(f"Starting efficient job search")
         self._log(f"Keywords: {keywords}, Location: {location}, Fresher: {is_fresher}, Target: {target_count}")
+        start_time = time.time()
 
         self._log(f"Launching browser (headless={self.browser.headless})...")
         try:
-            await asyncio.wait_for(self.browser.start(), timeout=30)
+            await asyncio.wait_for(self.browser.start(), timeout=60)
             self._log(f"Browser launched successfully")
         except asyncio.TimeoutError:
-            self._log(f"ERROR: Browser launch timed out after 30s")
+            self._log(f"ERROR: Browser launch timed out after 60s")
+            await self.browser.close()
             return []
         except Exception as e:
             self._log(f"ERROR: Browser launch failed: {type(e).__name__}: {e}")
             return []
         all_jobs = []
         seen_urls = set()
+        self._search_cache = {}  # {(portal, keyword, location): {"jobs": [...], "timestamp": float}}
         portals_to_search = portals or ["naukri", "indeed", "linkedin"]
 
+        # Split keywords — search each one separately to maximize coverage
+        keyword_list = [k.strip() for k in keywords.split(",") if k.strip()]
+        if not keyword_list:
+            keyword_list = [keywords]
+
+        # Collect more raw jobs than target since many get filtered out
+        raw_target = target_count * 5
+        time_up = False
+        browser_dead = False
+
         try:
-            for portal in portals_to_search:
-                if len(all_jobs) >= target_count:
+            for kw in keyword_list:
+                if len(all_jobs) >= raw_target or time_up or browser_dead:
                     break
 
-                self._log(f"\n{'='*50}")
-                self._log(f"Searching: {portal}")
-                self._log(f"{'='*50}")
+                self._log(f"\n{'#'*60}")
+                self._log(f"Keyword round: '{kw}' (total so far: {len(all_jobs)} raw jobs)")
+                self._log(f"{'#'*60}")
 
-                # 1. Navigate to portal
-                search_url = self._build_search_url(portal, keywords, location)
-                self._log(f"Navigating: {search_url}")
-
-                try:
-                    await self.browser.go_to(search_url, timeout=30000)
-                    await self.browser.wait(2)
-                    # Check if page loaded correctly
-                    page_url = await self.browser.get_url()
-                    page_title = await self.browser.page.title()
-                    self._log(f"Page loaded: {page_title[:60]} | URL: {page_url[:80]}")
-                except Exception as e:
-                    self._log(f"Navigation failed: {e}")
-                    continue
-
-                # 2. Close popups
-                await self._close_popups()
-
-                # 3. Select experience filter (fresher/0 years) using Mistral
-                if is_fresher:
-                    await self._select_experience_filter(portal, "0 years/fresher")
-                    await self.browser.wait(2)
-
-                # 4. Extract jobs from listing page (DOM - fast)
-                listing_jobs = await self._scroll_and_extract(max_scrolls=3)
-                self._log(f"Found {len(listing_jobs)} jobs on listing page")
-                if listing_jobs:
-                    for j in listing_jobs[:3]:
-                        self._log(f"  Sample: {j.get('title', 'no-title')} at {j.get('company', 'no-company')}")
-
-                # 5. Open each job page for detailed extraction (DOM - fast)
-                for job in listing_jobs[:10]:  # Limit to 10 jobs per portal
-                    if len(all_jobs) >= target_count:
+                for portal in portals_to_search:
+                    if len(all_jobs) >= raw_target or time_up or browser_dead:
                         break
 
-                    job_url = job.get("source_url") or job.get("apply_url")
-                    if not job_url or job_url in seen_urls:
-                        continue
+                    self._log(f"\n{'='*50}")
+                    self._log(f"Searching: {portal} for '{kw}'")
+                    self._log(f"{'='*50}")
 
-                    seen_urls.add(job_url)
+                    # Check overall time budget
+                    elapsed = time.time() - start_time
+                    if elapsed > overall_timeout:
+                        self._log(f"Overall time budget ({overall_timeout}s) reached at {elapsed:.0f}s, stopping")
+                        time_up = True
+                        break
 
-                    # Extract detailed info from job page
-                    detailed_job = await self._open_job_and_extract(job_url)
-                    if detailed_job and detailed_job.get("title"):
-                        detailed_job["source"] = portal
-                        all_jobs.append(detailed_job)
-                        self._log(f"Job {len(all_jobs)}: {detailed_job.get('title', 'Unknown')}")
-                    elif job.get("title"):
-                        # Use listing data if detail extraction fails
-                        job["source"] = portal
-                        all_jobs.append(job)
+                    try:
+                        portal_jobs = await asyncio.wait_for(
+                            self._search_single_portal(portal, kw, location, is_fresher, raw_target - len(all_jobs), seen_urls),
+                            timeout=90,  # 90 seconds per portal max
+                        )
+                        all_jobs.extend(portal_jobs)
+                        self._log(f"Portal {portal} [{kw}]: found {len(portal_jobs)} jobs (total: {len(all_jobs)})")
+                    except asyncio.TimeoutError:
+                        self._log(f"Portal {portal} [{kw}]: timed out after 90s, moving on")
+                    except Exception as e:
+                        self._log(f"Portal {portal} [{kw}]: failed with {type(e).__name__}: {e}")
 
-                self._log(f"Portal {portal}: {len(all_jobs)} total jobs")
+                    # Check browser still alive between portals
+                    if self.browser.is_browser_crashed():
+                        self._log("Browser crashed, stopping search")
+                        browser_dead = True
+                        break
 
         except Exception as e:
             self._log(f"Error: {e}")
         finally:
             await self.browser.close()
+
+        # Log extraction health stats
+        try:
+            if self.browser.browser:
+                health = self.browser.get_portal_health()
+                if health:
+                    self._log(f"Portal health: {health}")
+        except:
+            pass
 
         # Filter jobs based on experience, relevance, and location
         filtered_jobs = self._filter_jobs(all_jobs, keywords, location, is_fresher)
@@ -476,23 +630,172 @@ Respond with ONLY a JSON object:
         self._log(f"\nSearch complete: {len(filtered_jobs)} jobs found (filtered from {len(all_jobs)})")
         return filtered_jobs
 
+    async def _search_single_portal(self, portal: str, keywords: str, location: str,
+                                     is_fresher: bool, remaining: int, seen_urls: set) -> List[Dict]:
+        """Search a single portal with caching, network interception, and retry."""
+        import time as _time
+
+        # Check cache first
+        cache_key = (portal, keywords.lower().strip(), location.lower().strip())
+        cached = self._search_cache.get(cache_key)
+        if cached and (_time.time() - cached["timestamp"]) < 1800:  # 30 min cache
+            self._log(f"Cache hit for {portal}/{keywords} ({len(cached['jobs'])} cached jobs)")
+            return [j for j in cached["jobs"] if j.get("source_url") not in seen_urls][:remaining]
+
+        # Check portal health — skip retries if consistently broken
+        is_healthy = self.browser.is_portal_healthy(portal)
+        max_retries = 2 if is_healthy else 0
+
+        search_url = self._build_search_url(portal, keywords, location, is_fresher=is_fresher)
+        all_portal_jobs = []
+
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                wait_time = 3 * (2 ** (attempt - 1))  # 3s, 6s
+                self._log(f"Retry {attempt}/{max_retries} for {portal} (waiting {wait_time}s)...")
+                await asyncio.sleep(wait_time)
+
+            self._log(f"Navigating: {search_url}")
+            self.browser.clear_intercepted()
+
+            try:
+                await self.browser.go_to(search_url, timeout=30000)
+                await self.browser.wait(2)
+            except Exception as e:
+                self._log(f"Navigation failed: {e}")
+                continue
+
+            # Vision-guided navigation (popup dismissal + experience filter)
+            await self._vision_navigate(portal, is_fresher, keywords)
+
+            # Check for LinkedIn login wall — try to dismiss it first
+            if portal == "linkedin":
+                if await self._check_linkedin_blocked():
+                    self._log(f"LinkedIn sign-in wall detected, attempting dismiss...")
+                    await self._close_popups()
+                    # Also try LinkedIn-specific dismiss
+                    for sel in [
+                        "button[aria-label='Dismiss']",
+                        "button.authwall-join-form-modal__dismiss",
+                        ".join-form-modal__dismiss",
+                        "button[data-tracking-control-name='authwall_dismiss_btn']",
+                        "a.authwall-join-form-modal__dismiss",
+                    ]:
+                        try:
+                            await self.browser.page.click(sel, timeout=1000)
+                            await asyncio.sleep(0.5)
+                        except:
+                            continue
+                    await self.browser.page.keyboard.press("Escape")
+                    await asyncio.sleep(1)
+                    # Re-check: if job links are visible, proceed anyway
+                    try:
+                        link_count = await self.browser.page.evaluate(
+                            "() => document.querySelectorAll('a[href*=\"/jobs/view\"], a[href*=\"/job/\"]').length"
+                        )
+                        if link_count >= 3:
+                            self._log(f"LinkedIn: {link_count} job links visible after dismiss, extracting anyway")
+                        else:
+                            self._log(f"LinkedIn blocked by login wall, skipping")
+                            return []
+                    except:
+                        self._log(f"LinkedIn blocked by login wall, skipping")
+                        return []
+
+            await self.browser.wait(2)
+
+            # Try network interception first (fast, structured data)
+            intercepted = await self.browser.get_intercepted_jobs(portal)
+            if intercepted:
+                self._log(f"API intercept: {len(intercepted)} jobs from {portal}")
+                for job in intercepted:
+                    job_url = job.get("source_url") or job.get("apply_url") or ""
+                    # Generate synthetic URL for dedup if missing
+                    if not job_url and job.get("title"):
+                        job_url = f"{portal}:{job.get('title','')}:{job.get('company','')}"
+                        job["source_url"] = job_url
+                    if not job_url or job_url in seen_urls:
+                        continue
+                    seen_urls.add(job_url)
+                    if not job.get("source"):
+                        job["source"] = portal
+                    all_portal_jobs.append(job)
+
+            # DOM extraction (always run — catches what API missed)
+            listing_jobs = await self._paginate_and_extract(portal, max_pages=3)
+            self._log(f"DOM extraction: {len(listing_jobs)} jobs from {portal}")
+
+            detail_visits = 0
+            for job in listing_jobs:
+                if len(all_portal_jobs) >= remaining:
+                    break
+                job_url = job.get("source_url") or job.get("apply_url")
+                if not job_url or job_url in seen_urls:
+                    continue
+                seen_urls.add(job_url)
+                job["source"] = portal
+
+                # Visit detail page for jobs missing description (needed for ATS scoring)
+                has_desc = job.get("description") and len(job.get("description", "")) > 40
+                if not has_desc and detail_visits < 5 and job_url:
+                    detailed = await self._open_job_and_extract(job_url)
+                    if detailed:
+                        # Merge: listing data fills gaps, detail fills the rest
+                        for key in ["description", "experience_required", "experience", "salary", "skills"]:
+                            if not job.get(key) and detailed.get(key):
+                                job[key] = detailed[key]
+                        if detailed.get("company") and job.get("company", "Unknown") == "Unknown":
+                            job["company"] = detailed["company"]
+                        if detailed.get("location") and job.get("location", "Not specified") == "Not specified":
+                            job["location"] = detailed["location"]
+                    detail_visits += 1
+
+                all_portal_jobs.append(job)
+
+            if all_portal_jobs:
+                break  # Got jobs, no need to retry
+
+        # Cache results
+        if all_portal_jobs:
+            self._search_cache[cache_key] = {"jobs": all_portal_jobs, "timestamp": _time.time()}
+
+        return all_portal_jobs
+
     def _filter_jobs(self, jobs: List[Dict], keywords: str, location: str, is_fresher: bool) -> List[Dict]:
         """Filter jobs based on experience, relevance, and location."""
         filtered = []
         location_lower = location.lower()
-        keywords_lower = keywords.lower()
 
         # Tech keywords for relevance filtering
-        tech_keywords = ["software", "developer", "engineer", "programming", "coder", "tech", "java", "python",
+        tech_keywords = ["software", "developer", "programming", "coder", "tech", "java", "python",
                         "react", "angular", "node", "backend", "frontend", "full stack", "devops", "cloud",
                         "data", "analyst", "qa", "test", "automation", "database", "sql", "api", "web",
-                        "mobile", "app", "application", "iot", "embedded", "cyber", "security", "network"]
+                        "mobile", "app", "application", "iot", "embedded", "cyber", "security", "network",
+                        "appian", "bpm", "sail", "consultant"]
 
         # Non-tech job patterns to reject
         non_tech_patterns = ["teacher", "chemist", "dental", "nurse", "accountant", "marketing", "sales",
                            "hr specialist", "business analyst", "content writer", "graphic designer",
                            "security officer", "receptionist", "admin", "clerk", "peon", "driver",
-                           "cook", "cleaner", "housekeeping", "data entry", "typing", "back office"]
+                           "cook", "cleaner", "housekeeping", "data entry", "typing", "back office",
+                           "civil engineer", "mechanical engineer", "electrical engineer", "chemical engineer",
+                           "construction", "site engineer", "maintenance engineer", "production engineer",
+                           "field engineer", "plant engineer", "process engineer", "design engineer",
+                           "biomedical", "aeronautical", "automobile", "automotive", "mining",
+                           "architect", "surveyor", "foreman", "welder", "plumber", "electrician",
+                           "fitter", "technician", "helper", "labour", "labor", "supervisor",
+                           "warehouse", "logistics", "delivery", "driver", "pilot",
+                           "real estate", "property", "hotel", "hospitality", "retail", "restaurant",
+                           "banking", "insurance", "telecaller", "bpo", "voice process", "back office",
+                           "recruitment", "talent acquisition", "human resource", "payroll",
+                           "purchase", "procurement", "supply chain", "inventory", "merchandiser",
+                           "pharmacist", "medical", "healthcare", "nursing", "clinical"]
+
+        # "engineer" alone matches civil/mechanical/electrical — require tech qualifier
+        engineer_requires_tech = ["software", "java", "python", "react", "node", "backend", "frontend",
+                                  "full stack", "devops", "cloud", "data", "qa", "test", "automation",
+                                  "web", "mobile", "app", "iot", "embedded", "cyber", "network",
+                                  "platform", "systems", "sre", "machine learning", "ai"]
 
         # Location aliases
         city_aliases = {
@@ -510,6 +813,7 @@ Respond with ONLY a JSON object:
             company = (job.get("company", "") or "").lower()
             desc = (job.get("description", "") or "").lower()
             job_location = (job.get("location", "") or "").lower()
+            exp_text = (job.get("experience_required", "") or job.get("experience", "") or "").lower()
             combined = title + " " + company + " " + desc
 
             # Skip salary search entries
@@ -520,46 +824,70 @@ Respond with ONLY a JSON object:
             if any(pattern in title for pattern in non_tech_patterns):
                 continue
 
-            # Skip if title is not tech-related (must have at least one tech keyword)
-            if not any(kw in combined for kw in tech_keywords):
+            # Check if "engineer" in title has a tech qualifier
+            has_engineer = "engineer" in title
+            has_tech_qualifier = any(q in title for q in engineer_requires_tech)
+            engineer_is_tech = not has_engineer or has_tech_qualifier
+
+            # Require at least one tech keyword in the TITLE (not just description)
+            if not any(kw in title for kw in tech_keywords) and not engineer_is_tech:
                 continue
 
             # Location filtering
             if job_location and location_lower:
-                # Accept if location matches or is empty/generic
                 if not any(alias in job_location for alias in target_aliases):
-                    # Skip if location is specified but doesn't match
                     if job_location not in ["", "not specified", "india", "remote"]:
                         continue
 
             # Experience filtering for freshers
             if is_fresher:
-                # Reject senior roles
-                senior_patterns = ["senior", "lead", "principal", "staff", "director", "manager",
+                # Reject senior roles by title
+                senior_patterns = ["senior", "sr ", "sr.", "lead", "principal", "staff", "director", "manager",
                                   "architect", "head", "chief", " ii", " iii", " iv", " v",
-                                  " l2", " l3", " l4", " l5", " l6", "-ii", "-iii", "-iv"]
+                                  " l2", " l3", " l4", " l5", " l6", "-ii", "-iii", "-iv",
+                                  "plus yrs", "years exp"]
                 if any(w in title for w in senior_patterns):
                     continue
 
-                # Check experience requirement
-                exp = (job.get("experience", "") or "").lower()
-                if exp and exp != "not specified" and exp != "not mentioned":
-                    # Parse experience range
-                    exp_match = re.search(r'(\d+)\s*[-–+]\s*(\d*)', exp)
-                    if exp_match:
-                        min_exp = int(exp_match.group(1))
-                        if min_exp > 2:  # Reject if requires 2+ years
-                            continue
-
-                # Check if title indicates fresher-friendly
+                # Fresher-friendly indicators in title
                 fresher_indicators = ["fresher", "junior", "entry level", "intern", "trainee", "graduate", "0-1", "0-2"]
                 is_fresher_friendly = any(w in title for w in fresher_indicators)
 
-                # If experience is not specified, only keep if title indicates fresher-friendly
-                if (not exp or exp in ["not specified", "not mentioned"]) and not is_fresher_friendly:
-                    # Keep jobs without experience if they have matching skills
-                    matched_skills = [s for s in ["java", "python", "sql", "html", "css"] if s in combined]
-                    if not matched_skills:
+                # If title explicitly says fresher/intern/junior, accept it
+                if is_fresher_friendly:
+                    filtered.append(job)
+                    continue
+
+                # Parse experience from the experience_required field
+                if exp_text and exp_text not in ["not specified", "not mentioned", "not specified", ""]:
+                    exp_match = re.search(r'(\d+)\s*[-–+]\s*(\d*)', exp_text)
+                    if exp_match:
+                        min_exp = int(exp_match.group(1))
+                        if min_exp > 2:
+                            continue  # Requires 3+ years, reject for freshers
+                        # 0-2, 0-1, etc. are fine for freshers
+                    elif any(w in exp_text for w in ["3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"]):
+                        continue  # Explicitly requires multiple years
+                else:
+                    # No experience info at all — check description for experience requirements
+                    # Pattern: "3+ years of experience" or "3-5 years experience"
+                    exp_in_desc = re.search(r'(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)\s*(?:of\s*)?(?:experience|exp)', desc)
+                    if exp_in_desc and int(exp_in_desc.group(1)) > 2:
+                        continue  # Description says 3+ years required
+
+                    # Pattern: "Experience : 3+ yrs" or "EXPERIENCE: 3-5" (experience keyword BEFORE the number)
+                    exp_before = re.search(r'(?:experience|exp)\s*[:\-]?\s*(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)?', desc)
+                    if exp_before and int(exp_before.group(1)) > 2:
+                        continue
+
+                    # Pattern: "minimum X years" or "min X yrs"
+                    min_exp_desc = re.search(r'min(?:imum)?\s*(\d+)\s*(?:years?|yrs?)', desc)
+                    if min_exp_desc and int(min_exp_desc.group(1)) > 2:
+                        continue
+
+                    # Pattern: "3+ yrs" anywhere in first 500 chars of description
+                    quick_exp = re.search(r'(\d+)\+?\s*(?:years?|yrs?)', desc[:500])
+                    if quick_exp and int(quick_exp.group(1)) > 2:
                         continue
 
             filtered.append(job)
@@ -592,22 +920,111 @@ Respond with ONLY a JSON object:
         except:
             pass
 
-    def _build_search_url(self, portal: str, keywords: str, location: str) -> str:
-        """Build search URL for a portal."""
+    async def _check_linkedin_blocked(self) -> bool:
+        """Check if LinkedIn is blocking us with a login/auth wall."""
+        try:
+            url = self.browser.page.url
+            # Check URL patterns
+            if any(p in url for p in ["/login", "/checkpoint", "/authwall", "/authwall"]):
+                self._log("LinkedIn blocked: login wall detected (URL redirect)")
+                return True
+            # Check page content
+            content = await self.browser.page.content()
+            if any(text in content for text in ["Sign in to view", "Join LinkedIn", "Sign in to continue"]):
+                self._log("LinkedIn blocked: sign-in wall detected (page content)")
+                return True
+        except Exception as e:
+            self._log(f"LinkedIn block check failed: {e}")
+        return False
+
+    async def _vision_navigate(self, portal: str, is_fresher: bool, keywords: str) -> bool:
+        """Navigate portal page: close popups, apply experience filters.
+        Uses fast DOM methods first. Only calls vision model if DOM fails."""
+        # Always try fast DOM popup closing first (~1 second)
+        await self._close_popups()
+
+        # Check if job listings are already visible (most portals work fine)
+        try:
+            has_listings = await self.browser.page.evaluate("""() => {
+                const links = document.querySelectorAll('a[href]');
+                let jobLinks = 0;
+                for (const link of links) {
+                    const href = link.href || '';
+                    if (href.includes('/job') || href.includes('/viewjob') || href.includes('/job-detail')) {
+                        jobLinks++;
+                    }
+                }
+                return jobLinks;
+            }""")
+            self._log(f"Page has {has_listings} job links")
+            if has_listings >= 3:
+                # Page looks good, skip vision
+                return True
+        except:
+            pass
+
+        # Page looks broken or no results visible — try vision model
+        try:
+            import os
+            mistral_key = os.getenv("MISTRAL_API_KEY")
+            if not mistral_key:
+                self._log("No MISTRAL_API_KEY, can't use vision fallback")
+                return False
+
+            from agents.vision_scraper.ui_tars_agent import UITarsAgent
+            agent = UITarsAgent(self.browser, mistral_key, max_steps=3)
+
+            task_parts = ["If you see a popup or overlay blocking the page, close it."]
+            if is_fresher:
+                task_parts.append("If you see experience filter options, select 'Fresher' or 'Entry Level'.")
+            task_parts.append("If job listings are visible, say finished.")
+            task = " ".join(task_parts)
+
+            self._log(f"Using vision for {portal}...")
+            result = await agent.run(task)
+            status = result.get("status", "unknown")
+            self._log(f"Vision result: {status} ({result.get('steps', 0)} steps)")
+            return status in ("success", "finished")
+
+        except Exception as e:
+            self._log(f"Vision failed: {e}")
+            return False
+
+    def _build_search_url(self, portal: str, keywords: str, location: str, is_fresher: bool = False) -> str:
+        """Build search URL for a portal with experience-aware filtering."""
         kw = keywords.split(",")[0].strip().replace(" ", "%20")
         loc = location.replace(" ", "%20")
         kw_dash = kw.replace("%20", "-")
         loc_dash = loc.replace("%20", "-")
 
-        urls = {
-            "naukri": f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}",
-            "indeed": f"https://in.indeed.com/jobs?q={kw}&l={loc}",
-            "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}",
-            "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm",
-            "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}",
-            "shine": f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}",
-            "foundit": f"https://www.foundit.in/srp/results?query={kw}&location={loc}",
-            "cutshort": f"https://cutshort.io/jobs?q={kw}&location={loc}",
-        }
+        if portal == "naukri":
+            # Naukri natively supports {kw}-fresher-jobs-in-{loc} pattern
+            if is_fresher:
+                return f"https://www.naukri.com/{kw_dash}-fresher-jobs-in-{loc_dash}"
+            return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
+        elif portal == "indeed":
+            # NOTE: &explvl=entry_level triggers Cloudflare 403 — removed. Listing-first extraction + _filter_jobs() handles experience filtering.
+            return f"https://in.indeed.com/jobs?q={kw}&l={loc}"
+        elif portal == "linkedin":
+            url = f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
+            if is_fresher:
+                url += "&f_E=1"  # Entry level experience filter
+            return url
+        elif portal == "glassdoor":
+            # NOTE: ?experienceLevel=entryLevel triggers Cloudflare 403 — removed. Listing-first extraction + _filter_jobs() handles experience filtering.
+            return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm"
+        elif portal == "timesjobs":
+            url = f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
+            if is_fresher:
+                url += "&cboExp=0"  # 0 = fresher (verified: timesjobs uses cboExp, not experience)
+            return url
+        elif portal == "shine":
+            url = f"https://www.shine.com/job-search/{kw_dash}-fresher-jobs-in-{loc_dash}" if is_fresher else f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
+            return url
+        elif portal == "foundit":
+            url = f"https://www.foundit.in/srp/results?query={kw}&location={loc}"
+            if is_fresher:
+                url += "&experience=0"  # 0 years
+            return url
 
-        return urls.get(portal, f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}")
+        return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
