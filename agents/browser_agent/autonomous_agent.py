@@ -379,7 +379,7 @@ Respond with ONLY a JSON object:
 
         try:
             for kw in keyword_list:
-                if len(all_jobs) >= raw_target or time_up or browser_dead:
+                if time_up or browser_dead:
                     break
 
                 self._log(f"\n{'#'*60}")
@@ -387,7 +387,7 @@ Respond with ONLY a JSON object:
                 self._log(f"{'#'*60}")
 
                 for portal in portals_to_search:
-                    if len(all_jobs) >= raw_target or time_up or browser_dead:
+                    if time_up or browser_dead:
                         break
 
                     self._log(f"\n{'='*50}")
@@ -403,7 +403,7 @@ Respond with ONLY a JSON object:
 
                     try:
                         portal_jobs = await asyncio.wait_for(
-                            self._search_single_portal(portal, kw, location, raw_target - len(all_jobs), seen_urls),
+                            self._search_single_portal(portal, kw, location, 50, seen_urls),
                             timeout=180,  # 3 min per portal — visiting all detail pages takes time
                         )
                         all_jobs.extend(portal_jobs)
@@ -546,9 +546,21 @@ Respond with ONLY a JSON object:
                 # Visit detail page for EVERY job missing description
                 # Experience filtering requires full descriptions from all portals
                 has_desc = job.get("description") and len(job.get("description", "")) > 40
+
+                # Detect Cloudflare/blocked error pages in descriptions
+                if has_desc:
+                    desc_lower = job["description"].lower()
+                    if "cloudflare" in desc_lower or "ray id:" in desc_lower or "requested url:" in desc_lower:
+                        job["description"] = ""
+                        has_desc = False
+
                 if not has_desc and job_url:
                     detailed = await self._open_job_and_extract(job_url)
                     if detailed:
+                        # Check if detail page is also a Cloudflare block
+                        detail_desc = detailed.get("description", "")
+                        if detail_desc and ("cloudflare" in detail_desc.lower() or "ray id:" in detail_desc.lower()):
+                            detailed["description"] = ""
                         # Merge: listing data fills gaps, detail fills the rest
                         for key in ["description", "experience_required", "experience", "salary", "skills"]:
                             if not job.get(key) and detailed.get(key):
