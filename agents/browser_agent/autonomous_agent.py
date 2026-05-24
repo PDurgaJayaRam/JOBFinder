@@ -345,7 +345,7 @@ Respond with ONLY a JSON object:
     async def run_task(self, task: str, target_count: int = 20, keywords: str = "",
                        is_fresher: bool = False, location: str = "Hyderabad",
                        portals: List[str] = None, is_us: bool = False,
-                       overall_timeout: int = 600) -> List[Dict]:
+                       overall_timeout: int = 1200) -> List[Dict]:
         """Run efficient job search using Mistral for UI, DOM for data."""
         self._log(f"Starting efficient job search")
         self._log(f"Keywords: {keywords}, Location: {location}, Fresher: {is_fresher}, Target: {target_count}")
@@ -404,12 +404,12 @@ Respond with ONLY a JSON object:
                     try:
                         portal_jobs = await asyncio.wait_for(
                             self._search_single_portal(portal, kw, location, raw_target - len(all_jobs), seen_urls),
-                            timeout=90,  # 90 seconds per portal max
+                            timeout=180,  # 3 min per portal — visiting all detail pages takes time
                         )
                         all_jobs.extend(portal_jobs)
                         self._log(f"Portal {portal} [{kw}]: found {len(portal_jobs)} jobs (total: {len(all_jobs)})")
                     except asyncio.TimeoutError:
-                        self._log(f"Portal {portal} [{kw}]: timed out after 90s, moving on")
+                        self._log(f"Portal {portal} [{kw}]: timed out after 180s, moving on")
                     except Exception as e:
                         self._log(f"Portal {portal} [{kw}]: failed with {type(e).__name__}: {e}")
 
@@ -534,7 +534,6 @@ Respond with ONLY a JSON object:
             listing_jobs = await self._paginate_and_extract(portal, max_pages=3)
             self._log(f"DOM extraction: {len(listing_jobs)} jobs from {portal}")
 
-            detail_visits = 0
             for job in listing_jobs:
                 if len(all_portal_jobs) >= remaining:
                     break
@@ -544,9 +543,10 @@ Respond with ONLY a JSON object:
                 seen_urls.add(job_url)
                 job["source"] = portal
 
-                # Visit detail page for jobs missing description (needed for experience filtering + ATS scoring)
+                # Visit detail page for EVERY job missing description
+                # Experience filtering requires full descriptions from all portals
                 has_desc = job.get("description") and len(job.get("description", "")) > 40
-                if not has_desc and detail_visits < 10 and job_url:
+                if not has_desc and job_url:
                     detailed = await self._open_job_and_extract(job_url)
                     if detailed:
                         # Merge: listing data fills gaps, detail fills the rest
@@ -557,7 +557,6 @@ Respond with ONLY a JSON object:
                             job["company"] = detailed["company"]
                         if detailed.get("location") and job.get("location", "Not specified") == "Not specified":
                             job["location"] = detailed["location"]
-                    detail_visits += 1
 
                 all_portal_jobs.append(job)
 
