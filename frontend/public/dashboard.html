@@ -12,6 +12,15 @@
         .ats-high { background: #22c55e; }
         .ats-mid { background: #eab308; }
         .ats-low { background: #ef4444; }
+        .job-row { cursor: pointer; }
+        .job-row:hover { background: #f0fdf4 !important; }
+        .detail-row { display: none; }
+        .detail-row.open { display: table-row; }
+        .detail-cell { background: #f8fafc; padding: 16px 20px; border-bottom: 2px solid #e2e8f0; }
+        .detail-cell .desc-content { color: #334155; font-size: 13px; line-height: 1.6; max-height: 300px; overflow-y: auto; white-space: pre-wrap; }
+        .detail-cell .detail-meta { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 10px; }
+        .detail-cell .meta-tag { background: #e2e8f0; padding: 4px 10px; border-radius: 6px; font-size: 12px; color: #475569; }
+        .detail-cell .skills-list { color: #059669; font-size: 12px; margin-top: 8px; }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -156,7 +165,7 @@
                 const sourceClass = (job.source || '').toLowerCase();
                 const isApplied = job.status === 'applied';
 
-                return `<tr class="hover:bg-gray-50">
+                const mainRow = `<tr class="hover:bg-gray-50 job-row" onclick="toggleDetail('detail-${job.id}')">
                     <td class="px-4 py-3 text-gray-500">${i + 1}</td>
                     <td class="px-4 py-3 font-medium">${job.title}</td>
                     <td class="px-4 py-3">${job.company || '-'}</td>
@@ -187,12 +196,38 @@
                     </td>
                     <td class="px-4 py-3">
                         <div class="flex gap-1">
-                            ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" class="px-2 py-1 text-xs border rounded hover:bg-gray-50">Open</a>` : ''}
-                            ${!isApplied ? `<button onclick="markApplied(${job.id})" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">Mark Applied</button>` : ''}
+                            ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" onclick="event.stopPropagation()" class="px-2 py-1 text-xs border rounded hover:bg-gray-50">Open</a>` : ''}
+                            ${!isApplied ? `<button onclick="event.stopPropagation(); markApplied(${job.id})" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">Mark Applied</button>` : ''}
                         </div>
                     </td>
                 </tr>`;
+
+                // Detail row with full description
+                const desc = (job.description || 'No description available').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const skills = job.skills_required || '';
+                const matchedSkills = job.ai_analysis ? (JSON.parse(job.ai_analysis).matched_skills || []).join(', ') : '';
+                const detailRow = `<tr class="detail-row" id="detail-${job.id}">
+                    <td colspan="8" class="detail-cell">
+                        <div class="detail-meta">
+                            ${job.experience_required && job.experience_required !== 'Not specified' ? `<span class="meta-tag">Experience: ${job.experience_required}</span>` : ''}
+                            ${job.salary && job.salary !== 'Not specified' ? `<span class="meta-tag">Salary: ${job.salary}</span>` : ''}
+                            <span class="meta-tag">Source: ${job.source}</span>
+                            ${job.created_at ? `<span class="meta-tag">Added: ${new Date(job.created_at).toLocaleDateString()}</span>` : ''}
+                        </div>
+                        ${matchedSkills ? `<div class="skills-list">Matched skills: ${matchedSkills}</div>` : ''}
+                        ${skills ? `<div class="skills-list">Required skills: ${skills}</div>` : ''}
+                        <div style="margin-top:10px; font-size:12px; color:#64748b; font-weight:600;">Full Job Description:</div>
+                        <div class="desc-content">${desc}</div>
+                    </td>
+                </tr>`;
+
+                return mainRow + detailRow;
             }).join('');
+        }
+
+        function toggleDetail(id) {
+            const row = document.getElementById(id);
+            if (row) row.classList.toggle('open');
         }
 
         async function markApplied(jobId) {

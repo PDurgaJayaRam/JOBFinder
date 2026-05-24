@@ -179,6 +179,9 @@ class JobSaver:
                     "source_url": j.source_url,
                     "apply_url": j.apply_url,
                     "salary": j.salary,
+                    "experience_required": j.experience_required,
+                    "skills_required": j.skills_required,
+                    "description": j.description,
                     "ats_score": j.ats_score,
                     "match_score": j.match_score,
                     "status": j.status,
@@ -186,6 +189,7 @@ class JobSaver:
                     "walk_in": j.walk_in,
                     "internship": j.internship,
                     "fresher_friendly": j.fresher_friendly,
+                    "ai_analysis": j.ai_analysis,
                     "created_at": j.created_at.isoformat() if j.created_at else ""
                 }
                 for j in jobs

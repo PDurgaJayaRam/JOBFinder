@@ -105,8 +105,11 @@
         .badge-match-high { background: #10a37f; color: #fff; }
         .badge-match-med { background: #f59e0b; color: #fff; }
         .badge-match-low { background: #ef4444; color: #fff; }
-        .job-desc-row { background: #1a1a2e; padding: 6px 12px; }
-        .job-desc-row small { color: #999; }
+        .job-desc-row { background: #1a1a2e; padding: 8px 12px; }
+        .job-desc-row .desc-text { color: #ccc; font-size: 12px; line-height: 1.5; max-height: 80px; overflow: hidden; transition: max-height 0.3s; cursor: pointer; }
+        .job-desc-row .desc-text.expanded { max-height: 2000px; }
+        .job-desc-row .desc-toggle { color: #10a37f; font-size: 11px; cursor: pointer; margin-top: 4px; display: inline-block; }
+        .job-desc-row .desc-toggle:hover { text-decoration: underline; }
         .job-skills-row { background: #1a2a1a; padding: 6px 12px; }
         .job-skills-row small { color: #10a37f; }
 
@@ -504,8 +507,13 @@
                     <td>${job.apply_url ? `<a href="${job.apply_url}" target="_blank">Open →</a>` : '-'}</td>
                 </tr>`;
                 // Add description row
-                if (job.description) {
-                    html += `<tr><td colspan="8" class="job-desc-row"><small>${job.description.substring(0, 200)}${job.description.length > 200 ? '...' : ''}</small></td></tr>`;
+                if (job.description && job.description.length > 0) {
+                    const desc = job.description.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    const descId = 'desc-' + i + '-' + Date.now();
+                    html += `<tr><td colspan="8" class="job-desc-row">
+                        <div class="desc-text" id="${descId}">${desc}</div>
+                        ${desc.length > 200 ? `<span class="desc-toggle" onclick="toggleDesc('${descId}', this)">Show more</span>` : ''}
+                    </td></tr>`;
                 }
                 // Add matched skills row
                 if (job.matched_skills && job.matched_skills.length > 0) {
@@ -516,6 +524,13 @@
             div.innerHTML = html;
             container.appendChild(div);
             container.scrollTop = container.scrollHeight;
+        }
+
+        function toggleDesc(id, btn) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const expanded = el.classList.toggle('expanded');
+            btn.textContent = expanded ? 'Show less' : 'Show more';
         }
 
         function formatText(text) {
