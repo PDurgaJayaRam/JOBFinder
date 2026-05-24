@@ -88,12 +88,23 @@ class DualModelOrchestrator:
         location = context.get("location", "Hyderabad")
         target_count = context.get("target_count", 20)
 
+        # Form experience setting overrides resume analysis
+        ui_experience = context.get("experience", "").strip().lower()
+        if ui_experience == "fresher":
+            is_fresher = True
+        elif ui_experience == "experienced":
+            is_fresher = False
+        elif ui_experience.isdigit():
+            is_fresher = int(ui_experience) <= 2
+        else:
+            is_fresher = profile.get("is_fresher", True)
+
         prompt = SEARCH_PLAN_PROMPT.format(
             name=profile.get("name", "User"),
             skills=", ".join(profile.get("skills", [])),
             experience_years=profile.get("experience_years", 0),
             target_roles=", ".join(profile.get("target_roles", [])),
-            is_fresher=profile.get("is_fresher", True),
+            is_fresher=is_fresher,
             user_request=user_request,
             target_count=target_count,
             location=location,
@@ -596,6 +607,16 @@ Return ONLY the JSON array, no explanation:
         else:
             user_keywords = []
 
+        # Form experience setting overrides resume analysis for keyword generation
+        ui_exp = context.get("experience", "").strip().lower()
+        if ui_exp == "fresher":
+            profile["is_fresher"] = True
+        elif ui_exp == "experienced":
+            profile["is_fresher"] = False
+        elif ui_exp.isdigit():
+            profile["is_fresher"] = int(ui_exp) <= 2
+        # else: keep the resume analysis value
+
         # Use AI to generate smart keywords
         keywords = await self._generate_keywords_with_ai(profile, user_keywords, location)
 
@@ -624,11 +645,22 @@ Return ONLY the JSON array, no explanation:
             search_keywords = ", ".join(keywords[:5])
 
             # Run autonomous search — per-portal timeouts are handled inside run_task()
+            # Form experience setting overrides resume analysis
+            ui_exp = context.get("experience", "").strip().lower()
+            if ui_exp == "fresher":
+                is_fresher = True
+            elif ui_exp == "experienced":
+                is_fresher = False
+            elif ui_exp.isdigit():
+                is_fresher = int(ui_exp) <= 2
+            else:
+                is_fresher = profile.get("is_fresher", True)
+
             all_raw_jobs = await agent.run_task(
                 task=f"Search for jobs matching: {search_keywords}",
                 target_count=target_count,
                 keywords=search_keywords,
-                is_fresher=profile.get("is_fresher", True),
+                is_fresher=is_fresher,
                 location=location,
                 portals=portal_order,
                 overall_timeout=900,  # 15 minute overall budget (multiple keyword rounds)
