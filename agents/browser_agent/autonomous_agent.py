@@ -544,9 +544,9 @@ Respond with ONLY a JSON object:
                 seen_urls.add(job_url)
                 job["source"] = portal
 
-                # Visit detail page for jobs missing description (needed for ATS scoring)
+                # Visit detail page for jobs missing description (needed for experience filtering + ATS scoring)
                 has_desc = job.get("description") and len(job.get("description", "")) > 40
-                if not has_desc and detail_visits < 5 and job_url:
+                if not has_desc and detail_visits < 10 and job_url:
                     detailed = await self._open_job_and_extract(job_url)
                     if detailed:
                         # Merge: listing data fills gaps, detail fills the rest
@@ -575,12 +575,13 @@ Respond with ONLY a JSON object:
         filtered = []
         location_lower = location.lower()
 
-        # Tech keywords for relevance filtering
+        # Tech keywords for relevance filtering (must appear in title)
         tech_keywords = ["software", "developer", "programming", "coder", "tech", "java", "python",
                         "react", "angular", "node", "backend", "frontend", "full stack", "devops", "cloud",
-                        "data", "analyst", "qa", "test", "automation", "database", "sql", "api", "web",
+                        "qa", "test", "automation", "database", "sql", "api", "web",
                         "mobile", "app", "application", "iot", "embedded", "cyber", "security", "network",
-                        "appian", "bpm", "sail", "consultant"]
+                        "appian", "bpm", "sail", "consultant", "sde", "programmer",
+                        "data engineer", "data platform", "machine learning", "ai engineer"]
 
         # Non-tech job patterns to reject
         non_tech_patterns = ["teacher", "chemist", "dental", "nurse", "accountant", "marketing", "sales",
@@ -598,7 +599,9 @@ Respond with ONLY a JSON object:
                            "banking", "insurance", "telecaller", "bpo", "voice process", "back office",
                            "recruitment", "talent acquisition", "human resource", "payroll",
                            "purchase", "procurement", "supply chain", "inventory", "merchandiser",
-                           "pharmacist", "medical", "healthcare", "nursing", "clinical"]
+                           "pharmacist", "medical", "healthcare", "nursing", "clinical",
+                           "contractor", "controller", "accounts payable", "accounts receivable",
+                           "genius", "business data", "data scientist", "scientist"]
 
         # "engineer" alone matches civil/mechanical/electrical — require tech qualifier
         engineer_requires_tech = ["software", "java", "python", "react", "node", "backend", "frontend",
@@ -633,13 +636,15 @@ Respond with ONLY a JSON object:
             if any(pattern in title for pattern in non_tech_patterns):
                 continue
 
-            # Check if "engineer" in title has a tech qualifier
-            has_engineer = "engineer" in title
-            has_tech_qualifier = any(q in title for q in engineer_requires_tech)
-            engineer_is_tech = not has_engineer or has_tech_qualifier
+            # Require at least one tech keyword in the TITLE
+            has_tech_keyword = any(kw in title for kw in tech_keywords)
 
-            # Require at least one tech keyword in the TITLE (not just description)
-            if not any(kw in title for kw in tech_keywords) and not engineer_is_tech:
+            # If "engineer" in title, require a tech qualifier (software engineer OK, civil engineer NOT)
+            if "engineer" in title:
+                has_tech_qualifier = any(q in title for q in engineer_requires_tech)
+                if not has_tech_qualifier:
+                    continue
+            elif not has_tech_keyword:
                 continue
 
             # Location filtering
@@ -656,6 +661,10 @@ Respond with ONLY a JSON object:
                                   " l2", " l3", " l4", " l5", " l6", "-ii", "-iii", "-iv",
                                   "plus yrs", "years exp"]
                 if any(w in title for w in senior_patterns):
+                    continue
+
+                # Reject Arabic numeral level indicators: "Engineer 2", "SDE-3", "Level 4"
+                if re.search(r'(?:engineer|developer|sde)\s*[-\s]?\s*[2-9]\b', title):
                     continue
 
                 # Fresher-friendly indicators in title
@@ -679,29 +688,42 @@ Respond with ONLY a JSON object:
                         continue  # Explicitly requires multiple years
                 else:
                     # No experience info at all — check description for experience requirements
-                    # Pattern: "3+ years of experience" or "3-5 years experience"
-                    exp_in_desc = re.search(r'(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)\s*(?:of\s*)?(?:experience|exp)', desc)
-                    if exp_in_desc and int(exp_in_desc.group(1)) > 2:
-                        continue  # Description says 3+ years required
+                    # Pattern: "2+ years of professional software engineering experience" or "3-5 years experience"
+                    # Uses [\w\s]*? to handle words between "years" and "experience"
+                    exp_in_desc = re.search(r'(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)[\w\s]*?(?:experience|exp)', desc)
+                    if exp_in_desc:
+                        num = int(exp_in_desc.group(1))
+                        # "2+ years" means minimum 2 years — reject for freshers
+                        has_plus = "+" in exp_in_desc.group(0)[:exp_in_desc.group(0).index(exp_in_desc.group(1)) + len(exp_in_desc.group(1)) + 1]
+                        if num > 2 or (num >= 2 and has_plus):
+                            continue
 
                     # Pattern: "Experience : 3+ yrs" or "EXPERIENCE: 3-5" (experience keyword BEFORE the number)
                     exp_before = re.search(r'(?:experience|exp)\s*[:\-]?\s*(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)?', desc)
-                    if exp_before and int(exp_before.group(1)) > 2:
-                        continue
+                    if exp_before:
+                        num = int(exp_before.group(1))
+                        if num > 2 or (num >= 2 and "+" in exp_before.group(0)):
+                            continue
 
                     # Pattern: "minimum X years" or "min X yrs" or "at least X years"
                     min_exp_desc = re.search(r'(?:min(?:imum)?|at\s*least)\s*(\d+)\s*(?:years?|yrs?)', desc)
-                    if min_exp_desc and int(min_exp_desc.group(1)) > 2:
+                    if min_exp_desc and int(min_exp_desc.group(1)) >= 2:
                         continue
 
                     # Pattern: "3 to 5 years" or "3 to 5 yrs"
                     range_to = re.search(r'(\d+)\s+to\s+\d+\s*(?:years?|yrs?)', desc[:500])
-                    if range_to and int(range_to.group(1)) > 2:
+                    if range_to and int(range_to.group(1)) >= 2:
                         continue
 
                     # Pattern: "3+ yrs" or "3 yrs experience" anywhere in first 500 chars of description
                     quick_exp = re.search(r'(\d+)\+?\s*(?:years?|yrs?)', desc[:500])
-                    if quick_exp and int(quick_exp.group(1)) > 2:
+                    if quick_exp:
+                        num = int(quick_exp.group(1))
+                        if num > 2 or (num >= 2 and "+" in quick_exp.group(0)):
+                            continue
+
+                    # No experience info AND no description — can't verify, skip for freshers
+                    if not desc or len(desc) < 50:
                         continue
 
             filtered.append(job)
