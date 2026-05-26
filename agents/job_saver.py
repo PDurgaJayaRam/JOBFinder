@@ -73,29 +73,47 @@ class JobSaver:
                     exp_match = re.search(r'(\d+)\s*[-–+]\s*(\d*)', exp_text)
                     if exp_match:
                         min_exp = int(exp_match.group(1))
-                        if min_exp > 0 and not is_fresher_title:
+                        max_exp = int(exp_match.group(2)) if exp_match.group(2) else 0
+                        # For freshers: reject any role requiring 2+ years min experience
+                        # Also reject ranges where minimum is > 1 (e.g., "2-7 Yrs")
+                        if min_exp >= 2:
+                            skipped_count += 1
+                            continue
+                        if min_exp >= 1 and max_exp > 3:
                             skipped_count += 1
                             continue
                     elif any(w in exp_text for w in ["2+", "3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"]):
-                        if not is_fresher_title:
-                            skipped_count += 1
-                            continue
+                        skipped_count += 1
+                        continue
 
-                # Dedup check by URL
+                    # Also check description for experience requirements (for fresher-titled jobs)
+                    if is_fresher_title:
+                        desc_lower = (job_data.get("description", "") or "").lower()
+                        if desc_lower:
+                            exp_in_desc = re.search(r'(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)[\w\s]*?(?:experience|exp)', desc_lower)
+                            if exp_in_desc and int(exp_in_desc.group(1)) >= 2:
+                                skipped_count += 1
+                                continue
+                            exp_before = re.search(r'(?:experience|exp)\s*[:\-]?\s*(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)?', desc_lower)
+                            if exp_before and int(exp_before.group(1)) >= 2:
+                                skipped_count += 1
+                                continue
+
+                # Dedup check by URL (use scalars().first() to handle pre-existing duplicates)
                 exists = False
                 if source_url:
                     result = await session.execute(
-                        select(Job).where(Job.source_url == source_url)
+                        select(Job).where(Job.source_url == source_url).limit(1)
                     )
-                    if result.scalar_one_or_none():
+                    if result.scalars().first():
                         exists = True
                         dup_count += 1
 
                 if not exists and apply_url:
                     result = await session.execute(
-                        select(Job).where(Job.apply_url == apply_url)
+                        select(Job).where(Job.apply_url == apply_url).limit(1)
                     )
-                    if result.scalar_one_or_none():
+                    if result.scalars().first():
                         exists = True
                         dup_count += 1
 
@@ -105,9 +123,9 @@ class JobSaver:
                             Job.title == title,
                             Job.company == company,
                             Job.source == job_data.get("source", "")
-                        )
+                        ).limit(1)
                     )
-                    if result.scalar_one_or_none():
+                    if result.scalars().first():
                         exists = True
                         dup_count += 1
 
@@ -172,6 +190,7 @@ class JobSaver:
                     created_at=datetime.utcnow()
                 )
                 session.add(job)
+                await session.flush()  # Flush so within-batch dedup queries can see pending rows
                 new_count += 1
 
             await session.commit()

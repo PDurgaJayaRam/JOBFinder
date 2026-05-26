@@ -721,7 +721,7 @@ Respond with ONLY a JSON object:
                             "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
                             "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
-                            "foundit": f"https://www.foundit.in/search/{title_q}-jobs-in-{loc_q}",
+                            "foundit": f"https://www.foundit.in/srp/results?query={title_q}&locations={loc_q}",
                             "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
@@ -972,21 +972,34 @@ Respond with ONLY a JSON object:
                 fresher_indicators = ["fresher", "junior", "entry level", "intern", "trainee", "graduate", "0-1", "0-2"]
                 is_fresher_friendly = any(w in title for w in fresher_indicators)
 
-                # If title explicitly says fresher/intern/junior, accept it
-                if is_fresher_friendly:
-                    filtered.append(job)
-                    continue
-
                 # Parse experience from the experience_required field
                 if exp_text and exp_text not in ["not specified", "not mentioned", "not specified", ""]:
                     exp_match = re.search(r'(\d+)\s*[-–+]\s*(\d*)', exp_text)
                     if exp_match:
                         min_exp = int(exp_match.group(1))
+                        max_exp = int(exp_match.group(2)) if exp_match.group(2) else 0
                         if min_exp >= 2:
                             continue  # Requires 2+ years, reject for freshers
-                        # 0-1, 0-2, etc. are fine for freshers
+                        if min_exp >= 1 and max_exp > 3:
+                            continue  # "1-5 Yrs" etc. — too senior
+                        # 0-1, 0-2, 0-3 are fine for freshers
                     elif any(w in exp_text for w in ["2+", "3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"]):
                         continue  # Explicitly requires multiple years
+
+                # If title says fresher/junior but description requires 2+ years, reject anyway
+                if is_fresher_friendly:
+                    # Quick description check for experience requirements that contradict the title
+                    exp_in_desc = re.search(r'(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)[\w\s]*?(?:experience|exp)', desc)
+                    if exp_in_desc and int(exp_in_desc.group(1)) >= 2:
+                        continue
+                    exp_before = re.search(r'(?:experience|exp)\s*[:\-]?\s*(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)?', desc)
+                    if exp_before and int(exp_before.group(1)) >= 2:
+                        continue
+                    min_exp_desc = re.search(r'(?:min(?:imum)?|at\s*least)\s*(\d+)\s*(?:years?|yrs?)', desc)
+                    if min_exp_desc and int(min_exp_desc.group(1)) >= 2:
+                        continue
+                    filtered.append(job)
+                    continue
                 else:
                     # No experience info at all — check description for experience requirements
                     # Pattern: "2+ years of professional software engineering experience" or "3-5 years experience"
@@ -1140,6 +1153,6 @@ Respond with ONLY a JSON object:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/srp/results?query={kw}&location={loc}"
+            return f"https://www.foundit.in/srp/results?query={kw}&locations={loc}"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"

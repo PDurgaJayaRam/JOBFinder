@@ -179,14 +179,16 @@ Profile:
 - Location: {location}
 - User's keywords: {', '.join(user_keywords)}
 
-Generate 6-8 search keywords that will find relevant jobs on Indian job portals (Naukri, Indeed, LinkedIn).
+Generate 10-15 search keywords that will find relevant jobs on Indian job portals (Naukri, Indeed, LinkedIn).
 
 Rules:
 1. Include the user's keywords as role-based searches: e.g. if user says "SQL", search for "SQL Developer", "Data Analyst SQL"
-2. Include ALL target roles from the profile — do not skip any
-3. If fresher, add "Fresher", "Junior", "Entry Level", "Intern" variations for the most important roles
+2. Include ALL target roles from the profile — do not skip any. For each role, generate 2-3 variations.
+3. If fresher, add "Fresher", "Junior", "Entry Level", "Intern" variations for EVERY target role
 4. Make keywords realistic for job search (what people actually search for)
 5. Don't include HTML, CSS, SQL as standalone keywords (they're not job titles) — always combine with a role word
+6. Include skill-based roles: e.g. if user has "Appian", search for "Appian Developer", "Appian Consultant", "Appian Fresher"
+7. Include "Fresher" or "Junior" variations for every keyword when is_fresher is true
 
 Return ONLY the JSON array, no explanation:
 ["keyword1", "keyword2", "keyword3", ...]"""
@@ -194,7 +196,7 @@ Return ONLY the JSON array, no explanation:
             response = await self.ai.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=300,
+                max_tokens=500,
             )
 
             # Parse response - handle various formats
@@ -224,7 +226,7 @@ Return ONLY the JSON array, no explanation:
                     if uk not in keywords:
                         keywords.insert(0, uk)
 
-                # Ensure ALL target roles from profile are included
+                # Ensure ALL target roles from profile are included with variations
                 for role in roles:
                     role_lower = role.lower()
                     if not any(role_lower in kw.lower() for kw in keywords):
@@ -232,8 +234,9 @@ Return ONLY the JSON array, no explanation:
                         if is_fresher:
                             keywords.append(f"Junior {role}")
                             keywords.append(f"Entry Level {role}")
+                            keywords.append(f"{role} Fresher")
 
-                return keywords[:8]
+                return keywords[:15]
 
         except Exception as e:
             self._log("brain_planning", "warning", f"AI keyword generation failed, using fallback keywords: {e}")
@@ -242,9 +245,15 @@ Return ONLY the JSON array, no explanation:
         keywords = list(user_keywords)
         if is_fresher:
             keywords.extend(["Software Developer Fresher", "Junior Developer", "Entry Level Developer", "Software Intern", "Trainee Developer"])
+            for role in roles:
+                keywords.append(role)
+                keywords.append(f"Junior {role}")
+                keywords.append(f"{role} Fresher")
         else:
             keywords.extend(["Software Developer", "Software Engineer", "Backend Developer"])
-        return keywords[:8]
+            for role in roles:
+                keywords.append(role)
+        return keywords[:15]
 
     def _build_search_url(self, keyword: str, location: str, portal: str = "naukri") -> str:
         """Build direct search URL for a portal. Experience filtering is done post-scrape."""
@@ -262,7 +271,7 @@ Return ONLY the JSON array, no explanation:
         elif portal == "cutshort":
             return f"https://cutshort.io/jobs?q={kw}&location={loc}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/srp/results?query={kw}&location={loc}"
+            return f"https://www.foundit.in/srp/results?query={kw}&locations={loc}"
         elif portal == "timesjobs":
             return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
         elif portal == "shine":
@@ -655,8 +664,8 @@ Return ONLY the JSON array, no explanation:
         all_raw_jobs = []
 
         try:
-            # Combine keywords for the agent
-            search_keywords = ", ".join(keywords[:5])
+            # Combine keywords for the agent — use ALL generated keywords, not truncated
+            search_keywords = ", ".join(keywords)
 
             # Run autonomous search — per-portal timeouts are handled inside run_task()
             # Form experience setting overrides resume analysis
