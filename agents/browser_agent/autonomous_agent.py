@@ -728,13 +728,17 @@ Respond with ONLY a JSON object:
                         from urllib.parse import quote_plus
                         title_q = quote_plus(job.get("title", ""))
                         loc_q = quote_plus(location)
+                        title_d = title_q.replace("+", "-")
+                        loc_d = loc_q.replace("+", "-")
+                        ko_s = len(loc_d) + 1
+                        ko_e = ko_s + len(title_d)
                         portal_search_urls = {
-                            "naukri": f"https://www.naukri.com/{title_q}-jobs-in-{loc_q}",
+                            "naukri": f"https://www.naukri.com/{title_d}-jobs-in-{loc_d}",
                             "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
-                            "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
+                            "shine": f"https://www.shine.com/job-search/{title_d}-jobs-in-{loc_d}",
                             "foundit": f"https://www.foundit.in/srp/results?query={title_q}+{loc_q}",
-                            "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,{len(loc_q)}.htm",
+                            "glassdoor": f"https://www.glassdoor.co.in/Job/{title_d}-{loc_d}-jobs-SRCH_IL.0,{len(loc_d)}_KO{ko_s},{ko_e}.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
                         job_url = portal_search_urls.get(portal, "")
@@ -1152,10 +1156,13 @@ Respond with ONLY a JSON object:
 
     def _build_search_url(self, portal: str, keywords: str, location: str) -> str:
         """Build search URL for a portal. Experience filtering is done post-scrape by _filter_jobs()."""
-        kw = keywords.split(",")[0].strip().replace(" ", "%20")
-        loc = location.replace(" ", "%20")
-        kw_dash = kw.replace("%20", "-")
-        loc_dash = loc.replace("%20", "-")
+        from urllib.parse import quote
+        kw_raw = keywords.split(",")[0].strip()
+        loc_raw = location.strip()
+        kw = quote(kw_raw, safe='')  # URL-encode everything including #
+        loc = quote(loc_raw, safe='')
+        kw_dash = kw_raw.replace(" ", "-")  # For path-based URLs, use clean dashes
+        loc_dash = loc_raw.replace(" ", "-")
 
         if portal == "naukri":
             return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
@@ -1164,7 +1171,10 @@ Respond with ONLY a JSON object:
         elif portal == "linkedin":
             return f"https://www.linkedin.com/jobs/search/?keywords={kw}&location={loc}"
         elif portal == "glassdoor":
-            return f"https://www.glassdoor.co.in/Job/{loc_dash}-{kw_dash}-jobs-SRCH_IL.0,{len(loc_dash)}.htm"
+            # Format: {keyword}-{location}-jobs-SRCH_IL.0,{loc_len}_KO{kw_start},{kw_end}.htm
+            ko_s = len(loc_dash) + 1
+            ko_e = ko_s + len(kw_dash)
+            return f"https://www.glassdoor.co.in/Job/{kw_dash}-{loc_dash}-jobs-SRCH_IL.0,{len(loc_dash)}_KO{ko_s},{ko_e}.htm"
         elif portal == "timesjobs":
             return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
         elif portal == "shine":
