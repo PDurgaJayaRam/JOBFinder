@@ -516,9 +516,10 @@ Respond with ONLY a JSON object:
                 if time_up or browser_dead:
                     break
 
-                # Delay between keyword rounds (not the first one)
+                # Delay between keyword rounds — longer if Glassdoor is in the mix
                 if kw_idx > 0:
-                    await asyncio.sleep(random.uniform(5, 10))
+                    delay = random.uniform(10, 15) if "glassdoor" in portals_to_search else random.uniform(5, 10)
+                    await asyncio.sleep(delay)
 
                 self._log(f"\n{'#'*60}")
                 self._log(f"Keyword round: '{kw}' (total so far: {len(all_jobs)} raw jobs)")
@@ -538,6 +539,10 @@ Respond with ONLY a JSON object:
                         self._log(f"Overall time budget ({overall_timeout}s) reached at {elapsed:.0f}s, stopping")
                         time_up = True
                         break
+
+                    # Extra delay before Glassdoor to avoid anti-bot CAPTCHA
+                    if portal == "glassdoor":
+                        await asyncio.sleep(random.uniform(3, 6))
 
                     try:
                         portal_jobs = await asyncio.wait_for(
@@ -633,7 +638,7 @@ Respond with ONLY a JSON object:
                 self._log(f"Navigation failed: {e}")
                 continue
 
-            # Check for Cloudflare challenge / IP block — skip portal immediately
+            # Check for Cloudflare challenge / IP block — skip this keyword (not permanently)
             try:
                 page_content = await self.browser.page.content()
                 page_content_lower = page_content.lower()
@@ -641,12 +646,9 @@ Respond with ONLY a JSON object:
                    "humans only" in page_content_lower or \
                    "access denied" in page_content_lower or \
                    "cf_chl" in page_content_lower:
-                    self._log(f"BLOCKED: {portal} returned Cloudflare challenge — skipping for rest of session")
-                    # Mark portal as permanently unhealthy for this session
-                    self.browser._extraction_stats.setdefault(portal, {"attempts": 0, "jobs": 0, "zeros": 0, "last_zero": 0})
-                    self.browser._extraction_stats[portal]["zeros"] = 99
-                    self.browser._extraction_stats[portal]["attempts"] = 99
-                    break  # Skip to next portal
+                    self._log(f"BLOCKED: {portal} returned anti-bot challenge for '{kw}' — skipping keyword")
+                    # Don't permanently mark portal — just skip this keyword, next keyword might work
+                    break  # Skip to next keyword/portal
             except:
                 pass
 
@@ -732,7 +734,7 @@ Respond with ONLY a JSON object:
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
                             "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
                             "foundit": f"https://www.foundit.in/srp/results?query={title_q}+{loc_q}",
-                            "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
+                            "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,{len(loc_q)}.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
                         job_url = portal_search_urls.get(portal, "")
@@ -1113,7 +1115,7 @@ Respond with ONLY a JSON object:
                 let jobLinks = 0;
                 for (const link of links) {
                     const href = link.href || '';
-                    if (href.includes('/job') || href.includes('/viewjob') || href.includes('/job-detail')) {
+                    if (href.includes('/job') || href.includes('/viewjob') || href.includes('/job-detail') || href.includes('/job-listing')) {
                         jobLinks++;
                     }
                 }
