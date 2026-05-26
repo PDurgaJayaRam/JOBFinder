@@ -94,6 +94,7 @@ class Job(Base):
     match_score = Column(Float)
     status = Column(String(50), default=JobStatus.NEW)
     ai_analysis = Column(JSON, default=dict)
+    posted_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     applied_at = Column(DateTime)
 

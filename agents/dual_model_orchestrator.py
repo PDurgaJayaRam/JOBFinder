@@ -182,12 +182,11 @@ Profile:
 Generate 6-8 search keywords that will find relevant jobs on Indian job portals (Naukri, Indeed, LinkedIn).
 
 Rules:
-1. Include the user's keywords first
-2. Create role variations: "Java Developer", "Junior Java Developer", "Software Engineer Java"
-3. If fresher, add "Fresher", "Junior", "Entry Level", "Intern" variations
-4. Include generic roles: "Software Developer", "Backend Developer"
-5. Make keywords realistic for job search (what people actually search for)
-6. Don't include HTML, CSS, SQL as standalone keywords (they're not job titles)
+1. Include the user's keywords as role-based searches: e.g. if user says "SQL", search for "SQL Developer", "Data Analyst SQL"
+2. Include ALL target roles from the profile — do not skip any
+3. If fresher, add "Fresher", "Junior", "Entry Level", "Intern" variations for the most important roles
+4. Make keywords realistic for job search (what people actually search for)
+5. Don't include HTML, CSS, SQL as standalone keywords (they're not job titles) — always combine with a role word
 
 Return ONLY the JSON array, no explanation:
 ["keyword1", "keyword2", "keyword3", ...]"""
@@ -221,9 +220,19 @@ Return ONLY the JSON array, no explanation:
 
             if isinstance(keywords, list) and len(keywords) > 0:
                 # Ensure user keywords are included
-                for uk in user_keywords:
+                for uk in reversed(user_keywords):
                     if uk not in keywords:
                         keywords.insert(0, uk)
+
+                # Ensure ALL target roles from profile are included
+                for role in roles:
+                    role_lower = role.lower()
+                    if not any(role_lower in kw.lower() for kw in keywords):
+                        keywords.append(role)
+                        if is_fresher:
+                            keywords.append(f"Junior {role}")
+                            keywords.append(f"Entry Level {role}")
+
                 return keywords[:8]
 
         except Exception as e:
@@ -555,7 +564,7 @@ Return ONLY the JSON array, no explanation:
 
         jobs_to_save = []
         for job in matched_jobs:
-            jobs_to_save.append({
+            entry = {
                 "title": job.get("title", ""),
                 "company": job.get("company", "Unknown"),
                 "location": job.get("location", "Not specified"),
@@ -565,7 +574,12 @@ Return ONLY the JSON array, no explanation:
                 "salary": job.get("salary", "Not specified"),
                 "description": job.get("description", ""),
                 "experience_required": job.get("experience_required", "Not specified"),
-            })
+                "posted_text": job.get("posted_text", ""),
+            }
+            # Pass posted_date if already parsed by autonomous agent
+            if job.get("posted_date"):
+                entry["posted_date"] = job["posted_date"]
+            jobs_to_save.append(entry)
 
         saver = JobSaver()
         result = await saver.save_jobs(
@@ -623,7 +637,7 @@ Return ONLY the JSON array, no explanation:
         self._log("brain_planning", "keywords", f"Generated {len(keywords)} keywords: {', '.join(keywords[:5])}")
 
         # ─── Determine portals to search ────────────────────────────────
-        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit", "glassdoor"]
+        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit"]  # glassdoor disabled — Cloudflare blocks this IP
         if selected_portals:
             portal_order = [p for p in selected_portals if p in all_portals]
             if not portal_order:

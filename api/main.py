@@ -504,11 +504,11 @@ async def chat(req: ChatRequest):
 # === SAVED JOBS DASHBOARD ===
 
 @app.get("/saved-jobs")
-async def get_saved_jobs(limit: int = 100, offset: int = 0, status: str = None):
-    """Get all saved jobs from database."""
+async def get_saved_jobs(limit: int = 100, offset: int = 0, status: str = None, days: int = None):
+    """Get all saved jobs from database. Pass days=7 to show only jobs posted in last 7 days."""
     from agents.job_saver import JobSaver
     saver = JobSaver()
-    jobs = await saver.get_all_jobs(limit=limit, offset=offset, status=status)
+    jobs = await saver.get_all_jobs(limit=limit, offset=offset, status=status, days=days)
     return {"jobs": jobs, "count": len(jobs)}
 
 

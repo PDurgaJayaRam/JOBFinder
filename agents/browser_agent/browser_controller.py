@@ -78,22 +78,43 @@ class BrowserController:
         width = random.randint(1200, 1600)
         height = random.randint(800, 1000)
         user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) Gecko/20100101 Firefox/126.0",
         ]
         locales = ["en-US", "en-GB", "en-IN"]
         accept_languages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-IN,en;q=0.9,en-IN;q=0.8"]
 
+        selected_ua = random.choice(user_agents)
         self.context = await self.browser.new_context(
             viewport={"width": width, "height": height},
-            user_agent=random.choice(user_agents),
+            user_agent=selected_ua,
             locale=random.choice(locales),
             timezone_id="Asia/Kolkata",
             extra_http_headers={"Accept-Language": random.choice(accept_languages)},
         )
         self.page = await self.context.new_page()
+
+        # Inject anti-detection scripts before every page load
+        await self.page.add_init_script("""
+            // Remove webdriver flag
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // Override plugins to look like a real browser
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            // Override languages
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            // Override platform
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            // Chrome runtime mock
+            window.chrome = { runtime: {} };
+        """)
+
+        logger.info("Browser context created with UA: %s", selected_ua[:80])
 
         # Network response interception — capture API responses for job data
         self._network_responses = []
@@ -447,10 +468,17 @@ class BrowserController:
             stats["last_zero"] = time.time()
 
     def is_portal_healthy(self, portal: str) -> bool:
-        """Check if a portal has been returning results. Returns False if >5 zeros in last 10 attempts."""
+        """Check if a portal has been returning results. Auto-recovers after 5 min cooldown."""
+        import time
         stats = self._extraction_stats.get(portal)
         if not stats:
             return True  # No data yet, assume healthy
+        # Auto-recover: if last zero was >5 min ago, reset zero count
+        if stats["zeros"] > 5 and stats.get("last_zero", 0) > 0:
+            if time.time() - stats["last_zero"] > 300:  # 5 min cooldown
+                stats["zeros"] = 0
+                stats["attempts"] = 0
+                return True
         if stats["attempts"] < 5:
             return True  # Not enough data
         return stats["zeros"] <= 5
@@ -498,6 +526,7 @@ class BrowserController:
                 let experience = 'Not specified';
                 let salary = 'Not specified';
                 let description = '';
+                let posted_text = '';
 
                 if (card) {
                     const lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
@@ -521,6 +550,18 @@ class BrowserController:
                         // Company names typically: start with capital, contain letters/spaces/dots/&
                         if (/^[A-Z][a-zA-Z\s.&()'\-]+$/.test(line)) {
                             company = line;
+                            break;
+                        }
+                    }
+
+                    // Find posting date
+                    for (const line of lines) {
+                        const lowerLine = line.toLowerCase();
+                        if (lowerLine.match(/\d+\s*(?:day|hour|minute|week|month)s?\s*ago/i) ||
+                            lowerLine.match(/posted\s+/i) ||
+                            lowerLine === 'just posted' || lowerLine === 'today' || lowerLine === 'yesterday' ||
+                            lowerLine.match(/(?:\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2})/i)) {
+                            posted_text = line.replace(/^posted\s*/i, '').trim();
                             break;
                         }
                     }
@@ -561,19 +602,22 @@ class BrowserController:
                         }
                     }
 
-                    // Find description
+                    // Find description — collect multiple lines from card
+                    const descLines = [];
+                    const skipDesc = ['view all', 'see all', 'search', 'login', 'register',
+                        'save job', 'share', 'report', 'apply now', 'apply with',
+                        'easy apply', 'sign in', 'similar jobs', 'more jobs'];
                     for (const line of lines) {
-                        if (line.length > 40 && line.length < 400 &&
-                            !line.includes('days ago') && !line.toLowerCase().includes('apply') &&
-                            !line.toLowerCase().includes('job description') &&
-                            !line.toLowerCase().includes('company') &&
-                            !line.toLowerCase().includes('skills') &&
-                            !line.toLowerCase().includes('experience') &&
-                            !line.toLowerCase().includes('salary')) {
-                            description = line;
-                            break;
-                        }
+                        if (line === title || line === company || line === location) continue;
+                        if (line.length < 20 || line.length > 500) continue;
+                        const ll = line.toLowerCase();
+                        if (skipDesc.some(s => ll === s || ll.startsWith(s + ' '))) continue;
+                        if (ll.match(/^(full[\s-]?time|part[\s-]?time|internship|contract|fresher|remote|hybrid)$/i)) continue;
+                        if (line.match(/^[\d,]+\s*(results?|jobs?|positions?)$/i)) continue;
+                        descLines.push(line);
+                        if (descLines.join(' ').length > 600) break;
                     }
+                    description = descLines.join('\n').substring(0, 1500);
                 }
 
                 jobs.push({
@@ -585,7 +629,8 @@ class BrowserController:
                     apply_url: href,
                     salary,
                     description,
-                    experience_required: experience
+                    experience_required: experience,
+                    posted_text
                 });
             }
 
@@ -641,9 +686,11 @@ class BrowserController:
                 let company = '';
                 let location = 'Not specified';
                 let experience = 'Not specified';
-                
+                let posted_text = '';
+
+                let lines = [];
                 if (card) {
-                    const lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
+                    lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
                     for (const line of lines) {
                         if (line === text) continue;
                         if (line.length > 2 && line.length < 80 && /^[A-Z][a-zA-Z\s.&()'\-]+$/.test(line)) {
@@ -662,7 +709,7 @@ class BrowserController:
                     }
                     // Extract experience from card
                     for (const line of lines) {
-                        if (line.match(/\d[\s-]*[\d+]*\s*y(?:ears?|rs?)/i) || 
+                        if (line.match(/\d[\s-]*[\d+]*\s*y(?:ears?|rs?)/i) ||
                             line.match(/fresher/i) ||
                             line.match(/^0[\s-]*[-–]\s*\d/i) ||
                             line.match(/\d+\+\s*years?/i)) {
@@ -670,8 +717,36 @@ class BrowserController:
                             break;
                         }
                     }
+                    // Extract posting date
+                    for (const line of lines) {
+                        const ll = line.toLowerCase();
+                        if (ll.match(/\d+\s*(?:day|hour|minute|week|month)s?\s*ago/i) ||
+                            ll.match(/reposted?\s+\d/i) ||
+                            ll === 'just posted' || ll === 'today' || ll === 'yesterday' ||
+                            ll.match(/(?:\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2})/i)) {
+                            posted_text = line.replace(/^(?:re)?posted\s*/i, '').trim();
+                            break;
+                        }
+                    }
                 }
-                
+
+                // Try to extract description from card
+                let description = '';
+                if (card) {
+                    const descLines = [];
+                    const skipWords = ['view all', 'see all', 'search', 'login', 'register', 'apply now', 'easy apply', 'sign in', 'similar jobs'];
+                    for (const line of lines) {
+                        if (line === text || line === company || line === location) continue;
+                        if (line.length < 30 || line.length > 600) continue;
+                        const ll = line.toLowerCase();
+                        if (skipWords.some(s => ll === s || ll.startsWith(s + ' '))) continue;
+                        if (ll.match(/^(full[\s-]?time|part[\s-]?time|internship|contract|remote|hybrid)$/i)) continue;
+                        descLines.push(line);
+                        if (descLines.join(' ').length > 600) break;
+                    }
+                    description = descLines.join('\n').substring(0, 1500);
+                }
+
                 jobs.push({
                     title: text,
                     company: company || 'Unknown',
@@ -680,8 +755,9 @@ class BrowserController:
                     source_url: href,
                     apply_url: href,
                     salary: 'Not specified',
-                    description: '',
-                    experience_required: experience
+                    description: description,
+                    experience_required: experience,
+                    posted_text
                 });
             }
             
@@ -794,8 +870,11 @@ class BrowserController:
                 let experience = 'Not specified';
                 let salary = 'Not specified';
                 
+                let posted_text = '';
+
+                let lines = [];
                 if (card) {
-                    const lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
+                    lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
                     for (const line of lines) {
                         if (line === text) continue;
                         if (line.length > 2 && line.length < 80 && /^[A-Z][a-zA-Z\s.&()'\-]+$/.test(line)) {
@@ -824,8 +903,36 @@ class BrowserController:
                             break;
                         }
                     }
+                    // Extract posting date — Glassdoor uses short format like "2d ago", "30d+"
+                    for (const line of lines) {
+                        const ll = line.toLowerCase();
+                        if (ll.match(/\d+\s*(?:day|hour|minute|week|month)s?\s*ago/i) ||
+                            ll.match(/\d+d(?:\+|\s|$)/i) ||
+                            ll.match(/posted\s+/i) ||
+                            ll === 'just posted' || ll === 'today' || ll === 'yesterday' ||
+                            ll.match(/(?:\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2})/i)) {
+                            posted_text = line.replace(/^posted\s*/i, '').trim();
+                            break;
+                        }
+                    }
                 }
-                
+
+                // Try to extract description from card
+                let description = '';
+                if (card) {
+                    const descLines = [];
+                    const skipWords = ['view all', 'see all', 'search', 'login', 'register', 'apply now', 'sign in', 'similar jobs', 'report job'];
+                    for (const line of lines) {
+                        if (line === text || line === company || line === location) continue;
+                        if (line.length < 30 || line.length > 600) continue;
+                        const ll = line.toLowerCase();
+                        if (skipWords.some(s => ll === s || ll.startsWith(s + ' '))) continue;
+                        descLines.push(line);
+                        if (descLines.join(' ').length > 600) break;
+                    }
+                    description = descLines.join('\n').substring(0, 1500);
+                }
+
                 jobs.push({
                     title: text,
                     company: company || 'Unknown',
@@ -834,8 +941,9 @@ class BrowserController:
                     source_url: href,
                     apply_url: href,
                     salary: salary,
-                    description: '',
-                    experience_required: experience
+                    description: description,
+                    experience_required: experience,
+                    posted_text
                 });
             }
             
@@ -917,6 +1025,7 @@ class BrowserController:
                 let experience = 'Not specified';
                 let salary = 'Not specified';
                 let description = '';
+                let posted_text = '';
 
                 if (card) {{
                     const lines = card.innerText?.split('\\n').map(l => l.trim()).filter(l => l.length > 0) || [];
@@ -930,6 +1039,18 @@ class BrowserController:
                             !line.toLowerCase().includes('apply') &&
                             !line.toLowerCase().includes('location')) {{
                             company = line;
+                            break;
+                        }}
+                    }}
+
+                    // Extract posting date
+                    for (const line of lines) {{
+                        const ll = line.toLowerCase();
+                        if (ll.match(/\\d+\\s*(?:day|hour|minute|week|month)s?\\s*ago/i) ||
+                            ll.match(/posted\\s+/i) ||
+                            ll === 'just posted' || ll === 'today' || ll === 'yesterday' ||
+                            ll.match(/(?:\\d{{1,2}}\\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\s+\\d{{1,2}})/i)) {{
+                            posted_text = line.replace(/^posted\\s*/i, '').trim();
                             break;
                         }}
                     }}
@@ -965,16 +1086,22 @@ class BrowserController:
                         }}
                     }}
 
-                    // Find description
+                    // Find description — collect lines that look like job content
+                    const descLines = [];
+                    const skipDesc = ['view all', 'see all', 'search', 'login', 'register',
+                        'save job', 'share', 'report', 'posted', 'apply now', 'apply with',
+                        'easy apply', 'sign in', 'similar jobs', 'more jobs'];
                     for (const line of lines) {{
-                        if (line.length > 40 && line.length < 400 &&
-                            !line.toLowerCase().includes('job') &&
-                            !line.toLowerCase().includes('apply') &&
-                            !line.toLowerCase().includes('company')) {{
-                            description = line;
-                            break;
-                        }}
+                        if (line === text || line === company || line === location) continue;
+                        if (line.length < 30 || line.length > 500) continue;
+                        const ll = line.toLowerCase();
+                        if (skipDesc.some(s => ll === s || ll.startsWith(s + ' '))) continue;
+                        if (ll.match(/^(full[\\s-]?time|part[\\s-]?time|internship|contract|fresher|remote|hybrid)$/i)) continue;
+                        if (line.match(/^[\\d,]+\\s*(results?|jobs?|positions?)$/i)) continue;
+                        descLines.push(line);
+                        if (descLines.join(' ').length > 500) break;
                     }}
+                    description = descLines.join('\\n').substring(0, 1500);
                 }}
 
                 jobs.push({{
@@ -986,7 +1113,8 @@ class BrowserController:
                     apply_url: href,
                     salary: salary,
                     description: description,
-                    experience_required: experience
+                    experience_required: experience,
+                    posted_text
                 }});
             }}
 
@@ -1074,6 +1202,7 @@ class BrowserController:
                 let location = '';
                 let experience = '';
                 let salary = '';
+                let posted_text = '';
 
                 if (card) {
                     const lines = card.innerText?.split('\n').map(l => l.trim()).filter(l => l.length > 0) || [];
@@ -1085,6 +1214,16 @@ class BrowserController:
                             !line.toLowerCase().includes('apply') &&
                             !line.toLowerCase().includes('location')) {
                             company = line;
+                            break;
+                        }
+                    }
+                    // Extract posting date
+                    for (const line of lines) {
+                        const ll = line.toLowerCase();
+                        if (ll.match(/\d+\s*(?:day|hour|minute|week|month)s?\s*ago/i) ||
+                            ll.match(/posted\s+/i) ||
+                            ll === 'just posted' || ll === 'today' || ll === 'yesterday') {
+                            posted_text = line.replace(/^posted\s*/i, '').trim();
                             break;
                         }
                     }
@@ -1122,7 +1261,8 @@ class BrowserController:
                     apply_url: href,
                     salary: salary || 'Not specified',
                     description: '',
-                    experience_required: experience || 'Not specified'
+                    experience_required: experience || 'Not specified',
+                    posted_text
                 });
             }
 
@@ -1308,3 +1448,21 @@ class BrowserController:
             return False
         except Exception:
             return True
+
+    async def close_extra_tabs(self) -> int:
+        """Close all tabs/pages except the main page. Returns number of tabs closed."""
+        if not self.context or not self.page:
+            return 0
+        closed = 0
+        pages = list(self.context.pages)
+        for p in pages:
+            if p != self.page:
+                try:
+                    await p.close()
+                    closed += 1
+                except Exception:
+                    pass
+        if closed:
+            logger.info(f"Closed {closed} extra tab(s)")
+            print(f"[BROWSER] Closed {closed} extra tab(s)", flush=True)
+        return closed

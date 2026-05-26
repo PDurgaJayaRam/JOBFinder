@@ -249,13 +249,19 @@ Reply with ONLY the intent name."""
         # Build enriched context for orchestrator
         # Use portals from frontend settings, not message parsing
         frontend_portals = context.get("portals", [])
-        
+
+        # Override profile is_fresher with the UI setting (form > resume analysis)
+        enriched_profile = dict(profile) if profile else {}
+        enriched_profile["is_fresher"] = is_fresher
+        if user_exp_years is not None:
+            enriched_profile["experience_years"] = user_exp_years
+
         orchestrator_context = {
             "user_id": context.get("user_id"),
             "resume_text": resume,
             "location": location,
             "target_count": context.get("target_count", 20),
-            "profile": profile or {},
+            "profile": enriched_profile,
             "portals": frontend_portals if frontend_portals else None,
             "keywords": search_keywords,
             "experience": context.get("experience", "fresher"),  # Pass UI experience setting

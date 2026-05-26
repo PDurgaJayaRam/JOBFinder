@@ -2,7 +2,7 @@
 import os
 import re
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import select, or_
 from database.engine import async_session
 from database.models import Job, JobStatus
@@ -11,6 +11,13 @@ from config.skills import SKILL_KEYWORDS
 
 class JobSaver:
     """Saves jobs to database with dedup and ATS scoring."""
+
+    @staticmethod
+    def _sanitize(value: str) -> str:
+        """Remove newlines and control chars that break JS template literals."""
+        if not value:
+            return value
+        return value.replace('\n', ' ').replace('\r', '').strip()
 
     async def save_jobs(self, jobs: List[Dict], resume_text: str = "", user_id: str = None, is_fresher: bool = False, skills: List[str] = None) -> Dict:
         """Save jobs, skip duplicates, score with ATS."""
@@ -126,13 +133,24 @@ class JobSaver:
                     "intern", "trainee", "associate", "no experience"
                 ])
 
+                # Parse posted_date from posted_text or posted_date field
+                posted_dt = None
+                if job_data.get("posted_date"):
+                    try:
+                        posted_dt = datetime.fromisoformat(job_data["posted_date"])
+                    except:
+                        pass
+                if not posted_dt and job_data.get("posted_text"):
+                    from agents.browser_agent.autonomous_agent import _parse_posted_date
+                    posted_dt = _parse_posted_date(job_data["posted_text"])
+
                 job = Job(
                     user_id=user_id,
-                    title=title,
-                    company=company,
-                    location=job_data.get("location", ""),
-                    salary=job_data.get("salary", ""),
-                    experience_required=job_data.get("experience_required", ""),
+                    title=self._sanitize(title),
+                    company=self._sanitize(company),
+                    location=self._sanitize(job_data.get("location", "")),
+                    salary=self._sanitize(job_data.get("salary", "")),
+                    experience_required=self._sanitize(job_data.get("experience_required", "")),
                     skills_required=matched_skills if matched_skills else resume_skills[:5],
                     description=job_data.get("description", ""),
                     apply_url=apply_url,
@@ -150,6 +168,7 @@ class JobSaver:
                         "matched_skills": matched_skills,
                         "scored_at": datetime.utcnow().isoformat()
                     },
+                    posted_date=posted_dt,
                     created_at=datetime.utcnow()
                 )
                 session.add(job)
@@ -159,12 +178,17 @@ class JobSaver:
 
         return {"new": new_count, "duplicates": dup_count, "skipped": skipped_count, "total_saved": new_count}
 
-    async def get_all_jobs(self, limit: int = 100, offset: int = 0, status: str = None) -> List[Dict]:
-        """Get all saved jobs."""
+    async def get_all_jobs(self, limit: int = 100, offset: int = 0, status: str = None, days: int = None) -> List[Dict]:
+        """Get all saved jobs. If days is set, only return jobs posted within that many days."""
         async with async_session() as session:
             query = select(Job).order_by(Job.ats_score.desc())
             if status:
                 query = query.where(Job.status == status)
+            if days is not None:
+                cutoff = datetime.utcnow() - timedelta(days=days)
+                query = query.where(
+                    (Job.posted_date >= cutoff) | (Job.posted_date.is_(None))
+                )
             query = query.limit(limit).offset(offset)
             result = await session.execute(query)
             jobs = result.scalars().all()
@@ -172,9 +196,9 @@ class JobSaver:
             return [
                 {
                     "id": j.id,
-                    "title": j.title,
-                    "company": j.company,
-                    "location": j.location,
+                    "title": self._sanitize(j.title),
+                    "company": self._sanitize(j.company),
+                    "location": self._sanitize(j.location),
                     "source": j.source,
                     "source_url": j.source_url,
                     "apply_url": j.apply_url,
@@ -190,6 +214,7 @@ class JobSaver:
                     "internship": j.internship,
                     "fresher_friendly": j.fresher_friendly,
                     "ai_analysis": j.ai_analysis,
+                    "posted_date": j.posted_date.isoformat() if j.posted_date else "",
                     "created_at": j.created_at.isoformat() if j.created_at else ""
                 }
                 for j in jobs

@@ -69,6 +69,7 @@
         <div class="bg-white rounded-xl shadow-sm border p-4 mb-6">
             <div class="flex gap-2 flex-wrap">
                 <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border bg-blue-100 text-blue-700 border-blue-200" onclick="filterJobs('all', this)">All</button>
+                <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('recent', this)">Last 7 Days</button>
                 <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('high', this)">High ATS (70%+)</button>
                 <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('pending', this)">Pending Apply</button>
                 <button class="filter-btn px-3 py-1.5 rounded-lg text-sm border" onclick="filterJobs('applied', this)">Applied</button>
@@ -89,6 +90,7 @@
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Company</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Location</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Posted</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">ATS Score</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -123,6 +125,19 @@
             }
         }
 
+        function timeAgo(dateStr) {
+            if (!dateStr) return '-';
+            const now = new Date();
+            const d = new Date(dateStr);
+            const diffMs = now - d;
+            const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+            if (diffDays === 0) return 'Today';
+            if (diffDays === 1) return 'Yesterday';
+            if (diffDays < 7) return diffDays + 'd ago';
+            if (diffDays < 30) return Math.floor(diffDays / 7) + 'w ago';
+            return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+        }
+
         function updateStats(stats) {
             document.getElementById('stat-total').textContent = stats.total || 0;
             document.getElementById('stat-high').textContent = stats.high_ats || 0;
@@ -133,6 +148,14 @@
 
         function getFilteredJobs() {
             switch(currentFilter) {
+                case 'recent': {
+                    const cutoff = new Date();
+                    cutoff.setDate(cutoff.getDate() - 7);
+                    return allJobs.filter(j => {
+                        if (!j.posted_date) return true; // keep jobs with no date
+                        return new Date(j.posted_date) >= cutoff;
+                    });
+                }
                 case 'high': return allJobs.filter(j => (j.ats_score || 0) >= 70);
                 case 'pending': return allJobs.filter(j => j.status !== 'applied');
                 case 'applied': return allJobs.filter(j => j.status === 'applied');
@@ -155,7 +178,7 @@
             const tbody = document.getElementById('jobs-table-body');
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No jobs found. Use the chat to search for jobs.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" class="px-4 py-8 text-center text-gray-500">No jobs found. Use the chat to search for jobs.</td></tr>';
                 return;
             }
 
@@ -180,6 +203,7 @@
                             'bg-gray-100 text-gray-700'
                         }">${job.source}</span>
                     </td>
+                    <td class="px-4 py-3 text-xs text-gray-500">${timeAgo(job.posted_date)}</td>
                     <td class="px-4 py-3">
                         <div class="flex items-center gap-2">
                             <div class="w-16 bg-gray-200 rounded-full h-2">
@@ -196,7 +220,7 @@
                     </td>
                     <td class="px-4 py-3">
                         <div class="flex gap-1">
-                            ${job.apply_url ? `<a href="${job.apply_url}" target="_blank" onclick="event.stopPropagation()" class="px-2 py-1 text-xs border rounded hover:bg-gray-50">Open</a>` : ''}
+                            ${(job.apply_url || job.source_url) ? `<a href="${job.apply_url || job.source_url}" target="_blank" onclick="event.stopPropagation()" class="px-2 py-1 text-xs border rounded hover:bg-gray-50">Open</a>` : ''}
                             ${!isApplied ? `<button onclick="event.stopPropagation(); markApplied(${job.id})" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700">Mark Applied</button>` : ''}
                         </div>
                     </td>
@@ -205,9 +229,10 @@
                 // Detail row with full description
                 const desc = stripHtml(job.description || 'No description available');
                 const skills = job.skills_required || '';
-                const matchedSkills = job.ai_analysis ? (JSON.parse(job.ai_analysis).matched_skills || []).join(', ') : '';
+                const analysis = typeof job.ai_analysis === 'string' ? JSON.parse(job.ai_analysis) : (job.ai_analysis || {});
+                const matchedSkills = (analysis.matched_skills || []).join(', ');
                 const detailRow = `<tr class="detail-row" id="detail-${job.id}">
-                    <td colspan="8" class="detail-cell">
+                    <td colspan="9" class="detail-cell">
                         <div class="detail-meta">
                             ${job.experience_required && job.experience_required !== 'Not specified' ? `<span class="meta-tag">Experience: ${job.experience_required}</span>` : ''}
                             ${job.salary && job.salary !== 'Not specified' ? `<span class="meta-tag">Salary: ${job.salary}</span>` : ''}

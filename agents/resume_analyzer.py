@@ -45,9 +45,11 @@ Return JSON with these fields:
 }}
 
 IMPORTANT RULES:
-- is_fresher should be TRUE if: person has < 1 year full-time experience, only internships, graduated recently (2023-2025), or is a student
-- is_fresher should be FALSE only if: person has 1+ years of full-time (non-internship) work experience
-- target_roles should match the person's ACTUAL skills and experience level
+- is_fresher MUST be TRUE if: person has ONLY internships (not full-time jobs), graduated recently (2020-2026), or has < 1 year of full-time (non-internship) work experience
+- Internships do NOT count as full-time experience. An "Appian Consultant Intern" is still a fresher.
+- is_fresher should be FALSE ONLY if: person has 1+ years of confirmed full-time (non-internship, non-contract) work experience with clear dates
+- experience_years should be 0 for freshers/interns, otherwise actual years of full-time work
+- target_roles should match the person's ACTUAL skills and experience level (junior/entry-level roles for freshers)
 - skills should be the most relevant technical skills found in the resume"""
 
             response = await ai.chat_completion(

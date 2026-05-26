@@ -18,10 +18,88 @@ Efficient Flow:
 import json
 import re
 import time
+import random
 import asyncio
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from ai.ai_client import get_ai_client
 from agents.browser_agent.browser_controller import BrowserController
+
+
+def _parse_posted_date(text: str) -> Optional[datetime]:
+    """Convert relative/absolute date text to datetime. Returns None if unrecognizable."""
+    if not text:
+        return None
+    t = text.strip().lower()
+    now = datetime.utcnow()
+
+    # Relative patterns: "2 days ago", "3 hours ago", "5 weeks ago", "1 month ago"
+    m = re.search(r'(\d+)\s*(minute|hour|day|week|month)s?\s*ago', t)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2)
+        if unit == 'minute':
+            return now - timedelta(minutes=num)
+        elif unit == 'hour':
+            return now - timedelta(hours=num)
+        elif unit == 'day':
+            return now - timedelta(days=num)
+        elif unit == 'week':
+            return now - timedelta(weeks=num)
+        elif unit == 'month':
+            return now - timedelta(days=num * 30)
+
+    # "just posted", "today", "just now"
+    if any(w in t for w in ['just posted', 'just now', 'today']):
+        return now
+
+    # "yesterday"
+    if 'yesterday' in t:
+        return now - timedelta(days=1)
+
+    # Absolute: "15 May", "May 15", "15 May 2026", "May 15, 2026"
+    months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+              'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+    # "15 May 2026" or "15 May"
+    m = re.search(r'(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s,]*(\d{4})?', t)
+    if m:
+        day = int(m.group(1))
+        month = months.get(m.group(2)[:3])
+        year = int(m.group(3)) if m.group(3) else now.year
+        try:
+            return datetime(year, month, day)
+        except:
+            pass
+
+    # "May 15, 2026" or "May 15"
+    m = re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})[\s,]*(\d{4})?', t)
+    if m:
+        month = months.get(m.group(1)[:3])
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else now.year
+        try:
+            return datetime(year, month, day)
+        except:
+            pass
+
+    # "posted X days ago" without the "ago" (some portals)
+    m = re.search(r'posted\s+(\d+)\s*(minute|hour|day|week|month)', t)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2)
+        if unit == 'day':
+            return now - timedelta(days=num)
+        elif unit == 'week':
+            return now - timedelta(weeks=num)
+        elif unit == 'hour':
+            return now - timedelta(hours=num)
+
+    # Glassdoor short format: "2d", "30d+", "6d ago"
+    m = re.search(r'(\d+)\s*d(?:\+|\s|$|ago)', t)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    return None
 
 
 class AutonomousAgent:
@@ -108,23 +186,41 @@ Respond with ONLY a JSON object:
 
     async def _open_job_and_extract(self, job_url: str) -> Dict:
         """Open a job page and extract details using DOM (fast). Skips Cloudflare-blocked URLs."""
-        # Skip known Cloudflare-blocked portals (detail pages cause redirect loops)
-        if "glassdoor.co.in" in job_url or "glassdoor.com" in job_url:
-            return {}
+        # Skip known Cloudflare-blocked portals — but only if URL still looks like the
+        # original portal after redirect (allow if redirected to job content)
+        is_glassdoor = "glassdoor" in job_url.lower()
 
         new_page = None
         try:
             new_page = await self.browser.context.new_page()
-            # Use networkidle to detect Cloudflare redirect loops early
-            await new_page.goto(job_url, wait_until='domcontentloaded', timeout=12000)
+            await new_page.goto(job_url, wait_until='domcontentloaded', timeout=20000)
 
-            # Check if we landed on a Cloudflare challenge page
+            # Check if we landed on a Cloudflare challenge or login page
             page_url = new_page.url
-            if "challenge" in page_url or "cdn-cgi" in page_url:
+            page_title = ""
+            try:
+                page_title = (await new_page.title()).lower()
+            except:
+                pass
+            # Skip if stuck on challenge page
+            if "challenge" in page_url or "cdn-cgi" in page_url or "glassdoor.com/verify" in page_url:
                 await new_page.close()
                 return {}
 
-            await asyncio.sleep(1.5)
+            # Check page content for Cloudflare block
+            try:
+                quick_content = (await new_page.content()).lower()
+                if "humans only" in quick_content or "ray id:" in quick_content and "cloudflare" in quick_content:
+                    await new_page.close()
+                    return {}
+            except:
+                pass
+
+            # If redirected to login/signin, try to grab whatever is visible
+            if "login" in page_url or "signin" in page_url or "auth" in page_url:
+                pass  # Still try to extract — some pages show partial content
+
+            await asyncio.sleep(2)
 
             # Extract using DOM — multi-strategy for all portals
             job_data = await new_page.evaluate("""() => {
@@ -137,6 +233,7 @@ Respond with ONLY a JSON object:
                     skills: [],
                     experience: '',
                     salary: '',
+                    posted_text: '',
                     apply_url: window.location.href
                 };
 
@@ -185,22 +282,27 @@ Respond with ONLY a JSON object:
                 }
 
                 // Fallback: grab all text from body if no description found
-                if (!data.description) {
+                if (!data.description || data.description.length < 80) {
                     const body = document.body.innerText || '';
                     // Look for job description section markers
-                    const markers = ['job description', 'job description', 'about the role', 'about the job',
+                    const markers = ['job description', 'about the role', 'about the job',
                         'what you will do', 'responsibilities', 'requirements', 'qualifications',
-                        'what we are looking for', 'role description', 'key responsibilities'];
+                        'what we are looking for', 'role description', 'key responsibilities',
+                        'about the company', 'key skills', 'skills required', 'job summary',
+                        'what you\\'ll do', 'your role', 'role overview'];
                     const lowerBody = body.toLowerCase();
                     for (const marker of markers) {
                         const idx = lowerBody.indexOf(marker);
                         if (idx !== -1) {
-                            data.description = body.substring(idx, idx + 2000).trim();
+                            const snippet = body.substring(idx, idx + 2500).trim();
+                            if (snippet.length > (data.description || '').length) {
+                                data.description = snippet;
+                            }
                             break;
                         }
                     }
-                    if (!data.description && body.length > 200) {
-                        data.description = body.substring(0, 1500).trim();
+                    if ((!data.description || data.description.length < 80) && body.length > 200) {
+                        data.description = body.substring(0, 2000).trim();
                     }
                 }
 
@@ -220,15 +322,28 @@ Respond with ONLY a JSON object:
                     const expMatch = text.match(/(?:experience|exp)[\\s:.-]*(\\d+)[\\s-]*[-–]?[\\s]*(\\d+)?[\\s]*(?:years?|yrs?)/i)
                         || text.match(/(\\d+)[\\s-]*[-–]?[\\s]*(\\d+)?[\\s]*(?:years?|yrs?)[\\s]*(?:of\\s*)?(?:experience|exp)/i);
                     if (expMatch) data.experience = expMatch[0];
-                    const fresherMatch = text.match(/fresher|entry.?level|0[\s-]*[-–]?[\s]*1[\s]*(?:years?|yrs?)/i);
+                    const fresherMatch = text.match(/fresher|entry.?level|0[\\s-]*[-–]?[\\s]*1[\\s]*(?:years?|yrs?)/i);
                     if (fresherMatch && !data.experience) data.experience = fresherMatch[0];
                 }
 
                 // Extract skills from description
                 if (data.description) {
-                    const skillPatterns = /(?:java|python|javascript|react|angular|node[\s.]?js|sql|html|css|aws|docker|git|spring[\s.]?boot|django|flask|fastapi|typescript|vue[\s.]?js|mongodb|postgresql|redis|kubernetes|hibernate|microservices|rest[\s.]?api|graphql|junit|selenium|jenkins|terraform)/gi;
+                    const skillPatterns = /(?:java|python|javascript|react|angular|node[\\s.]?js|sql|html|css|aws|docker|git|spring[\\s.]?boot|django|flask|fastapi|typescript|vue[\\s.]?js|mongodb|postgresql|redis|kubernetes|hibernate|microservices|rest[\\s.]?api|graphql|junit|selenium|jenkins|terraform)/gi;
                     const matches = data.description.match(skillPatterns);
                     if (matches) data.skills = [...new Set(matches.map(s => s.toLowerCase()))];
+                }
+
+                // Extract posting date
+                const datePatterns = [
+                    /\\d+\\s*(?:minute|hour|day|week|month)s?\\s*ago/i,
+                    /(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\s+\\d{1,2}[,]?\\s*\\d{0,4}/i,
+                    /\\d{1,2}\\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[,]?\\s*\\d{0,4}/i,
+                    /just\\s+posted|today|yesterday/i
+                ];
+                const body = document.body.innerText || '';
+                for (const pat of datePatterns) {
+                    const m = body.match(pat);
+                    if (m) { data.posted_text = m[0]; break; }
                 }
 
                 return data;
@@ -397,9 +512,13 @@ Respond with ONLY a JSON object:
         browser_dead = False
 
         try:
-            for kw in keyword_list:
+            for kw_idx, kw in enumerate(keyword_list):
                 if time_up or browser_dead:
                     break
+
+                # Delay between keyword rounds (not the first one)
+                if kw_idx > 0:
+                    await asyncio.sleep(random.uniform(5, 10))
 
                 self._log(f"\n{'#'*60}")
                 self._log(f"Keyword round: '{kw}' (total so far: {len(all_jobs)} raw jobs)")
@@ -431,6 +550,17 @@ Respond with ONLY a JSON object:
                         self._log(f"Portal {portal} [{kw}]: timed out after 180s, moving on")
                     except Exception as e:
                         self._log(f"Portal {portal} [{kw}]: failed with {type(e).__name__}: {e}")
+
+                    # Anti-detection delay between portals (random 3-7s)
+                    import random
+                    delay = random.uniform(3, 7)
+                    await asyncio.sleep(delay)
+
+                    # Close any extra tabs/popups opened by the portal
+                    try:
+                        await self.browser.close_extra_tabs()
+                    except Exception:
+                        pass
 
                     # Check browser still alive between portals
                     if self.browser.is_browser_crashed():
@@ -486,12 +616,54 @@ Respond with ONLY a JSON object:
             self._log(f"Navigating: {search_url}")
             self.browser.clear_intercepted()
 
+            # Close any leftover tabs from previous search
+            try:
+                await self.browser.close_extra_tabs()
+            except Exception:
+                pass
+
             try:
                 await self.browser.go_to(search_url, timeout=30000)
                 await self.browser.wait(2)
             except Exception as e:
                 self._log(f"Navigation failed: {e}")
                 continue
+
+            # Check for Cloudflare challenge / IP block — skip portal immediately
+            try:
+                page_content = await self.browser.page.content()
+                page_content_lower = page_content.lower()
+                if ("ray id:" in page_content_lower and "cloudflare" in page_content_lower) or \
+                   "humans only" in page_content_lower or \
+                   "access denied" in page_content_lower or \
+                   "cf_chl" in page_content_lower:
+                    self._log(f"BLOCKED: {portal} returned Cloudflare challenge — skipping for rest of session")
+                    # Mark portal as permanently unhealthy for this session
+                    self.browser._extraction_stats.setdefault(portal, {"attempts": 0, "jobs": 0, "zeros": 0, "last_zero": 0})
+                    self.browser._extraction_stats[portal]["zeros"] = 99
+                    self.browser._extraction_stats[portal]["attempts"] = 99
+                    break  # Skip to next portal
+            except:
+                pass
+
+            # Check for "no results" page — skip portal immediately
+            try:
+                page_text = (await self.browser.get_page_content(max_chars=3000)).lower()
+                no_result_signals = [
+                    "no result", "no-result", "no jobs found", "0 jobs",
+                    "sorry no result", "no matching jobs", "we couldn't find",
+                    "0 results", "did not match any", "no openings",
+                    "your search did not match", "no vacancies",
+                ]
+                if any(signal in page_text for signal in no_result_signals):
+                    self._log(f"No results page detected on {portal} for '{kw}' — skipping")
+                    # Mark as zero-result but don't penalize permanently (keyword might just not exist)
+                    self.browser._extraction_stats.setdefault(portal, {"attempts": 0, "jobs": 0, "zeros": 0, "last_zero": 0})
+                    self.browser._extraction_stats[portal]["attempts"] += 1
+                    self.browser._extraction_stats[portal]["zeros"] += 1
+                    break  # Skip to next portal
+            except:
+                pass
 
             # Vision-guided navigation (popup dismissal + experience filter)
             await self._vision_navigate(portal, keywords)
@@ -536,17 +708,62 @@ Respond with ONLY a JSON object:
             intercepted = await self.browser.get_intercepted_jobs(portal)
             if intercepted:
                 self._log(f"API intercept: {len(intercepted)} jobs from {portal}")
+                api_detail_visits = 0
                 for job in intercepted:
                     job_url = job.get("source_url") or job.get("apply_url") or ""
-                    # Generate synthetic URL for dedup if missing
+                    # Build a real search URL if no link available
                     if not job_url and job.get("title"):
-                        job_url = f"{portal}:{job.get('title','')}:{job.get('company','')}"
+                        from urllib.parse import quote_plus
+                        title_q = quote_plus(job.get("title", ""))
+                        loc_q = quote_plus(location)
+                        portal_search_urls = {
+                            "naukri": f"https://www.naukri.com/{title_q}-jobs-in-{loc_q}",
+                            "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
+                            "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
+                            "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
+                            "foundit": f"https://www.foundit.in/search/{title_q}-jobs-in-{loc_q}",
+                            "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
+                            "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
+                        }
+                        job_url = portal_search_urls.get(portal, "")
+                        if not job_url:
+                            continue  # Skip if we can't build a search URL
                         job["source_url"] = job_url
+                        job["apply_url"] = job_url
                     if not job_url or job_url in seen_urls:
                         continue
                     seen_urls.add(job_url)
                     if not job.get("source"):
                         job["source"] = portal
+                    # Visit detail page for intercepted jobs missing description (cap at 5 per portal)
+                    has_desc = job.get("description") and len(job.get("description", "")) > 40
+                    if has_desc:
+                        desc_lower = job["description"].lower()
+                        if "cloudflare" in desc_lower or "ray id:" in desc_lower:
+                            job["description"] = ""
+                            has_desc = False
+                    if not has_desc and job_url and api_detail_visits < 5:
+                        import random
+                        await asyncio.sleep(random.uniform(1.5, 3.5))
+                        api_detail_visits += 1
+                        detailed = await self._open_job_and_extract(job_url)
+                        try:
+                            await self.browser.close_extra_tabs()
+                        except Exception:
+                            pass
+                        if detailed:
+                            detail_desc = detailed.get("description", "")
+                            if detail_desc and ("cloudflare" in detail_desc.lower() or "ray id:" in detail_desc.lower()):
+                                detailed["description"] = ""
+                            for key in ["description", "experience_required", "experience", "salary", "skills"]:
+                                if not job.get(key) and detailed.get(key):
+                                    job[key] = detailed[key]
+                            if detailed.get("company") and job.get("company", "Unknown") == "Unknown":
+                                job["company"] = detailed["company"]
+                            if detailed.get("location") and job.get("location", "Not specified") == "Not specified":
+                                job["location"] = detailed["location"]
+                            if not job.get("posted_text") and detailed.get("posted_text"):
+                                job["posted_text"] = detailed["posted_text"]
                     all_portal_jobs.append(job)
 
             # DOM extraction (always run — catches what API missed)
@@ -574,7 +791,15 @@ Respond with ONLY a JSON object:
                         has_desc = False
 
                 if not has_desc and job_url:
+                    # Random delay between detail page visits to avoid anti-bot detection
+                    import random
+                    await asyncio.sleep(random.uniform(1.5, 3.5))
                     detailed = await self._open_job_and_extract(job_url)
+                    # Close any extra tabs opened by the detail page
+                    try:
+                        await self.browser.close_extra_tabs()
+                    except Exception:
+                        pass
                     if detailed:
                         # Check if detail page is also a Cloudflare block
                         detail_desc = detailed.get("description", "")
@@ -588,11 +813,25 @@ Respond with ONLY a JSON object:
                             job["company"] = detailed["company"]
                         if detailed.get("location") and job.get("location", "Not specified") == "Not specified":
                             job["location"] = detailed["location"]
+                        if not job.get("posted_text") and detailed.get("posted_text"):
+                            job["posted_text"] = detailed["posted_text"]
+
+                # Convert posted_text to posted_date for filtering
+                if not job.get("posted_date") and job.get("posted_text"):
+                    parsed = _parse_posted_date(job["posted_text"])
+                    if parsed:
+                        job["posted_date"] = parsed.isoformat()
 
                 all_portal_jobs.append(job)
 
             if all_portal_jobs:
                 break  # Got jobs, no need to retry
+
+        # Clean up any leaked tabs from detail page visits
+        try:
+            await self.browser.close_extra_tabs()
+        except Exception:
+            pass
 
         # Cache results
         if all_portal_jobs:
@@ -616,7 +855,7 @@ Respond with ONLY a JSON object:
                         "analyst", "data", "reporting", "power bi", "tableau", "etl"]
 
         # Non-tech job patterns to reject
-        non_tech_patterns = ["teacher", "chemist", "dental", "nurse", "accountant", "marketing", "sales",
+        non_tech_patterns = ["teacher", "trainer", "chemist", "dental", "nurse", "accountant", "marketing", "sales",
                            "hr specialist", "business analyst", "content writer", "graphic designer",
                            "security officer", "receptionist", "admin", "clerk", "peon", "driver",
                            "cook", "cleaner", "housekeeping", "data entry", "typing", "back office",
@@ -633,7 +872,12 @@ Respond with ONLY a JSON object:
                            "purchase", "procurement", "supply chain", "inventory", "merchandiser",
                            "pharmacist", "medical", "healthcare", "nursing", "clinical",
                            "contractor", "controller", "accounts payable", "accounts receivable",
-                           "genius", "business data", "data scientist", "scientist"]
+                           "genius", "business data", "data scientist", "scientist",
+                           "financial analyst", "finance", "treasury", "audit", "tax",
+                           "customer support", "tech support", "service desk", "helpdesk",
+                           "snowflake developer", "snowflake", "sap ", "sap consultant",
+                           "oracle dba", "oracle apps", "peoplesoft", "siebel",
+                           "returnship"]
 
         # "engineer" alone matches civil/mechanical/electrical — require tech qualifier
         engineer_requires_tech = ["software", "java", "python", "react", "node", "backend", "frontend",
@@ -652,7 +896,18 @@ Respond with ONLY a JSON object:
         }
         target_aliases = city_aliases.get(location_lower, [location_lower])
 
+        # Date cutoff for "recent jobs only" filtering
+        cutoff = datetime.utcnow() - timedelta(days=7)
+
         for job in jobs:
+            # Filter out jobs older than 7 days (skip if no date info — allow those through)
+            posted_text = job.get("posted_text", "")
+            posted_date = _parse_posted_date(posted_text)
+            if posted_date and posted_date < cutoff:
+                continue
+            if posted_date:
+                job["posted_date"] = posted_date.isoformat()
+
             title = (job.get("title", "") or "").lower()
             company = (job.get("company", "") or "").lower()
             desc = (job.get("description", "") or "").lower()
@@ -662,6 +917,10 @@ Respond with ONLY a JSON object:
 
             # Skip salary search entries
             if "salary search" in title or "salary search" in desc[:100]:
+                continue
+
+            # Skip verification/CAPTCHA pages extracted as "jobs"
+            if "additional verification" in title or "captcha" in title or "access denied" in title:
                 continue
 
             # Skip DataAnnotation spam (same company, same template, different titles)
@@ -723,10 +982,10 @@ Respond with ONLY a JSON object:
                     exp_match = re.search(r'(\d+)\s*[-–+]\s*(\d*)', exp_text)
                     if exp_match:
                         min_exp = int(exp_match.group(1))
-                        if min_exp > 2:
-                            continue  # Requires 3+ years, reject for freshers
-                        # 0-2, 0-1, etc. are fine for freshers
-                    elif any(w in exp_text for w in ["3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"]):
+                        if min_exp >= 2:
+                            continue  # Requires 2+ years, reject for freshers
+                        # 0-1, 0-2, etc. are fine for freshers
+                    elif any(w in exp_text for w in ["2+", "3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"]):
                         continue  # Explicitly requires multiple years
                 else:
                     # No experience info at all — check description for experience requirements
@@ -737,14 +996,14 @@ Respond with ONLY a JSON object:
                         num = int(exp_in_desc.group(1))
                         # "2+ years" means minimum 2 years — reject for freshers
                         has_plus = "+" in exp_in_desc.group(0)[:exp_in_desc.group(0).index(exp_in_desc.group(1)) + len(exp_in_desc.group(1)) + 1]
-                        if num > 2 or (num >= 2 and has_plus):
+                        if num >= 2 or (num >= 1 and has_plus):
                             continue
 
                     # Pattern: "Experience : 3+ yrs" or "EXPERIENCE: 3-5" (experience keyword BEFORE the number)
                     exp_before = re.search(r'(?:experience|exp)\s*[:\-]?\s*(\d+)\+?\s*[-–]?\s*\d*\s*(?:years?|yrs?)?', desc)
                     if exp_before:
                         num = int(exp_before.group(1))
-                        if num > 2 or (num >= 2 and "+" in exp_before.group(0)):
+                        if num >= 2 or (num >= 1 and "+" in exp_before.group(0)):
                             continue
 
                     # Pattern: "minimum X years" or "min X yrs" or "at least X years"
@@ -761,12 +1020,10 @@ Respond with ONLY a JSON object:
                     quick_exp = re.search(r'(\d+)\+?\s*(?:years?|yrs?)', desc[:500])
                     if quick_exp:
                         num = int(quick_exp.group(1))
-                        if num > 2 or (num >= 2 and "+" in quick_exp.group(0)):
+                        if num >= 2 or (num >= 1 and "+" in quick_exp.group(0)):
                             continue
 
-                    # No experience info AND no description — can't verify, skip for freshers
-                    if not desc or len(desc) < 50:
-                        continue
+                    # No experience info AND no description — allow through (will be enriched by detail page)
 
             filtered.append(job)
 
