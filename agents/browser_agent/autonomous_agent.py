@@ -602,7 +602,11 @@ Respond with ONLY a JSON object:
 
         # Check portal health — skip retries if consistently broken
         is_healthy = self.browser.is_portal_healthy(portal)
-        max_retries = 2 if is_healthy else 0
+        # LinkedIn is always blocked by login wall — don't waste retries
+        if portal == "linkedin" and not is_healthy:
+            max_retries = 0
+        else:
+            max_retries = 2 if is_healthy else 0
 
         search_url = self._build_search_url(portal, keywords, location)
         all_portal_jobs = []
@@ -648,12 +652,15 @@ Respond with ONLY a JSON object:
 
             # Check for "no results" page — skip portal immediately
             try:
-                page_text = (await self.browser.get_page_content(max_chars=3000)).lower()
+                await self.browser.wait(1)  # Wait for JS to render
+                page_text = (await self.browser.get_page_content(max_chars=5000)).lower()
                 no_result_signals = [
                     "no result", "no-result", "no jobs found", "0 jobs",
                     "sorry no result", "no matching jobs", "we couldn't find",
-                    "0 results", "did not match any", "no openings",
-                    "your search did not match", "no vacancies",
+                    "we couldn't find a match", "0 results", "did not match any",
+                    "no openings", "your search did not match", "no vacancies",
+                    "please make sure your keywords", "did not match",
+                    "page not found", "404", "no openings found",
                 ]
                 if any(signal in page_text for signal in no_result_signals):
                     self._log(f"No results page detected on {portal} for '{kw}' — skipping")
@@ -721,7 +728,7 @@ Respond with ONLY a JSON object:
                             "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
                             "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
-                            "foundit": f"https://www.foundit.in/srp/results?query={title_q}&locations={loc_q}",
+                            "foundit": f"https://www.foundit.in/srp/results?query={title_q}+{loc_q}&locations={loc_q}",
                             "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
@@ -826,6 +833,11 @@ Respond with ONLY a JSON object:
 
             if all_portal_jobs:
                 break  # Got jobs, no need to retry
+
+            # If we extracted 0 jobs from DOM and API intercept, don't retry — skip immediately
+            if not all_portal_jobs:
+                self._log(f"0 jobs extracted from {portal} for '{kw}' — skipping retries")
+                break
 
         # Clean up any leaked tabs from detail page visits
         try:
@@ -1153,6 +1165,6 @@ Respond with ONLY a JSON object:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/srp/results?query={kw}&locations={loc}"
+            return f"https://www.foundit.in/srp/results?query={kw}+{loc}&locations={loc}"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
