@@ -271,9 +271,7 @@ Return ONLY the JSON array, no explanation:
         elif portal == "cutshort":
             return f"https://cutshort.io/jobs?q={kw}&location={loc}"
         elif portal == "foundit":
-            kw_dash = kw.replace("%20", "-")
-            loc_dash = loc.replace("%20", "-")
-            return f"https://www.foundit.in/jobs/{kw_dash}-jobs-in-{loc_dash}"
+            return f"https://www.foundit.in/srp/results?query={kw}+{loc}"
         elif portal == "timesjobs":
             return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
         elif portal == "shine":
@@ -648,7 +646,7 @@ Return ONLY the JSON array, no explanation:
         self._log("brain_planning", "keywords", f"Generated {len(keywords)} keywords: {', '.join(keywords[:5])}")
 
         # ─── Determine portals to search ────────────────────────────────
-        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit"]  # glassdoor disabled — Cloudflare blocks this IP
+        all_portals = ["naukri", "indeed", "linkedin", "timesjobs", "shine", "foundit", "glassdoor"]
         if selected_portals:
             portal_order = [p for p in selected_portals if p in all_portals]
             if not portal_order:

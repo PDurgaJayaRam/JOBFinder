@@ -731,7 +731,7 @@ Respond with ONLY a JSON object:
                             "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
                             "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
-                            "foundit": f"https://www.foundit.in/jobs/{title_q}-jobs-in-{loc_q}",
+                            "foundit": f"https://www.foundit.in/srp/results?query={title_q}+{loc_q}",
                             "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
@@ -1168,6 +1168,6 @@ Respond with ONLY a JSON object:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/jobs/{kw_dash}-jobs-in-{loc_dash}"
+            return f"https://www.foundit.in/srp/results?query={kw}+{loc}"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"
