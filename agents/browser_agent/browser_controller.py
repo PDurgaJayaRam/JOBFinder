@@ -805,17 +805,78 @@ class BrowserController:
         return jobs
 
     async def _extract_foundit_jobs(self) -> List[Dict[str, Any]]:
-        """Extract Foundit jobs - uses /job-details/ and /srdc/jobs/ patterns."""
-        jobs = await self._extract_with_patterns([
-            r'/job-details/',
-            r'/srdc/jobs/',
-            r'/job/\d+',
-            r'/jobs/\d+',
-        ], 'foundit')
+        """Extract Foundit jobs from SPA cards (.srpCardsWrapper). No hyperlinks on cards."""
+        jobs = await self.page.evaluate("""() => {
+            const cards = document.querySelectorAll('.srpCardsWrapper');
+            const jobs = [];
+            const seen = new Set();
+            for (const card of cards) {
+                const lines = card.innerText?.split('\\n').map(l => l.trim()).filter(l => l.length > 0) || [];
+                if (lines.length < 2) continue;
+                // First line is title
+                const title = lines[0];
+                if (!title || title.length < 4 || title.length > 150) continue;
+                // Skip non-job entries
+                const tl = title.toLowerCase();
+                if (['showing', 'no result', 'sorry', 'login', 'register'].some(s => tl.startsWith(s))) continue;
 
-        # If no jobs found, try generic extraction as fallback
+                // Second line is company
+                let company = lines[1] || 'Unknown';
+                if (company.includes('confidential') || company.includes('Company name')) company = 'Confidential';
+
+                // Remaining lines: location, experience, posted date, etc.
+                let location = 'Not specified';
+                let experience = 'Not specified';
+                let posted_text = '';
+                let salary = 'Not specified';
+                const cityKeywords = ['hyderabad', 'bangalore', 'bengaluru', 'chennai', 'mumbai', 'delhi', 'pune',
+                    'kolkata', 'gurgaon', 'noida', 'remote', 'india', 'ahmedabad', 'jaipur'];
+                const expPattern = /^\\d+\\s*-\\s*\\d+\\s*years?$/i;
+                const fresherPattern = /^fresher$/i;
+                const postedPattern = /(?:posted|ago|days?|hours?|minutes?|weeks?|months?)/i;
+                const salaryPattern = /(?:INR|LPA|\\d+\\s*-\\s*\\d+)/i;
+
+                for (let i = 2; i < lines.length; i++) {
+                    const line = lines[i];
+                    const ll = line.toLowerCase();
+                    if (!location.match(/^(?:\\d|Not)/) && cityKeywords.some(c => ll.includes(c))) {
+                        location = line;
+                    } else if (expPattern.test(line) || fresherPattern.test(line)) {
+                        experience = line;
+                    } else if (salaryPattern.test(line)) {
+                        salary = line;
+                    } else if (postedPattern.test(line)) {
+                        posted_text = line.replace(/^posted\\s*/i, '').trim();
+                    }
+                }
+
+                // Generate a search URL for the job detail
+                const searchUrl = 'https://www.foundit.in/srp/results?query=' + encodeURIComponent(title);
+
+                const key = title + '|' + company;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                jobs.push({
+                    title, company, location, experience, salary,
+                    description: '',
+                    source: 'foundit',
+                    source_url: searchUrl,
+                    apply_url: searchUrl,
+                    posted_text
+                });
+            }
+            return jobs;
+        }""")
+
         if not jobs:
-            return await self._extract_generic_jobs()
+            # Fallback to link-based extraction
+            return await self._extract_with_patterns([
+                r'/job-details/',
+                r'/srdc/jobs/',
+                r'/job/\d+',
+                r'/jobs/\d+',
+            ], 'foundit')
         return jobs
 
     async def _extract_timesjobs_jobs(self) -> List[Dict[str, Any]]:

@@ -654,15 +654,18 @@ Respond with ONLY a JSON object:
             try:
                 await self.browser.wait(1)  # Wait for JS to render
                 page_text = (await self.browser.get_page_content(max_chars=5000)).lower()
+                # Only trigger if the page EXPLICITLY says no results (not just "no" in some sentence)
                 no_result_signals = [
-                    "no result", "no-result", "no jobs found", "0 jobs",
+                    "no result", "no-result", "no jobs found",
                     "sorry no result", "no matching jobs", "we couldn't find",
-                    "we couldn't find a match", "0 results", "did not match any",
+                    "we couldn't find a match", "did not match any",
                     "no openings", "your search did not match", "no vacancies",
-                    "please make sure your keywords", "did not match",
-                    "page not found", "404", "no openings found",
+                    "please make sure your keywords",
                 ]
-                if any(signal in page_text for signal in no_result_signals):
+                # Don't trigger if page says "showing X results" or "X jobs found"
+                has_positive = "showing" in page_text and "results" in page_text
+                has_positive = has_positive or ("found" in page_text and "jobs" in page_text and "no" not in page_text[:page_text.find("found")])
+                if not has_positive and any(signal in page_text for signal in no_result_signals):
                     self._log(f"No results page detected on {portal} for '{kw}' — skipping")
                     # Mark as zero-result but don't penalize permanently (keyword might just not exist)
                     self.browser._extraction_stats.setdefault(portal, {"attempts": 0, "jobs": 0, "zeros": 0, "last_zero": 0})
@@ -728,7 +731,7 @@ Respond with ONLY a JSON object:
                             "indeed": f"https://in.indeed.com/jobs?q={title_q}&l={loc_q}",
                             "linkedin": f"https://www.linkedin.com/jobs/search/?keywords={title_q}&location={loc_q}",
                             "shine": f"https://www.shine.com/job-search/{title_q}-jobs-in-{loc_q}",
-                            "foundit": f"https://www.foundit.in/srp/results?query={title_q}+{loc_q}&locations={loc_q}",
+                            "foundit": f"https://www.foundit.in/jobs/{title_q}-jobs-in-{loc_q}",
                             "glassdoor": f"https://www.glassdoor.co.in/Job/{loc_q}-{title_q}-jobs-SRCH_IL.0,9_IS11787_KO10,30.htm",
                             "timesjobs": f"https://www.timesjobs.com/candidate/job-search.html?searchType=personalizedSearch&from=brain&txtKeywords={title_q}&txtLocation={loc_q}",
                         }
@@ -1084,14 +1087,14 @@ Respond with ONLY a JSON object:
         """Check if LinkedIn is blocking us with a login/auth wall."""
         try:
             url = self.browser.page.url
-            # Check URL patterns
-            if any(p in url for p in ["/login", "/checkpoint", "/authwall", "/authwall"]):
+            # Check URL patterns — redirected to login page
+            if any(p in url for p in ["/login", "/checkpoint", "/authwall"]):
                 self._log("LinkedIn blocked: login wall detected (URL redirect)")
                 return True
-            # Check page content
-            content = await self.browser.page.content()
-            if any(text in content for text in ["Sign in to view", "Join LinkedIn", "Sign in to continue"]):
-                self._log("LinkedIn blocked: sign-in wall detected (page content)")
+            # Only check for auth wall if we were REDIRECTED away from the jobs page
+            # The jobs search page itself has "Sign in" in the nav bar — that's normal
+            if "/jobs/" not in url and "/jobs?" not in url:
+                self._log("LinkedIn blocked: redirected away from jobs page")
                 return True
         except Exception as e:
             self._log(f"LinkedIn block check failed: {e}")
@@ -1165,6 +1168,6 @@ Respond with ONLY a JSON object:
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/srp/results?query={kw}+{loc}&locations={loc}"
+            return f"https://www.foundit.in/jobs/{kw_dash}-jobs-in-{loc_dash}"
 
         return f"https://www.naukri.com/{kw_dash}-jobs-in-{loc_dash}"

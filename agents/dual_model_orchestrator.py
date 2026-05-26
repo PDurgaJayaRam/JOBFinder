@@ -271,7 +271,9 @@ Return ONLY the JSON array, no explanation:
         elif portal == "cutshort":
             return f"https://cutshort.io/jobs?q={kw}&location={loc}"
         elif portal == "foundit":
-            return f"https://www.foundit.in/srp/results?query={kw}+{loc}&locations={loc}"
+            kw_dash = kw.replace("%20", "-")
+            loc_dash = loc.replace("%20", "-")
+            return f"https://www.foundit.in/jobs/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "timesjobs":
             return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
         elif portal == "shine":
