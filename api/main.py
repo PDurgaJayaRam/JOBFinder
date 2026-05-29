@@ -82,6 +82,12 @@ agent_messages = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Clear SQLAlchemy loggers created during engine init (they add their own handlers)
+    for name in ["sqlalchemy.engine", "sqlalchemy.pool", "sqlalchemy.orm"]:
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.setLevel(logging.WARNING)
+        lg.propagate = False
     yield
 
 
