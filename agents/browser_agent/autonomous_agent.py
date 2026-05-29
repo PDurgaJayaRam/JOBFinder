@@ -885,7 +885,7 @@ Respond with ONLY a JSON object:
 
             # If we extracted 0 jobs from DOM and API intercept, don't retry — skip immediately
             if not all_portal_jobs:
-                self._log(f"0 jobs extracted from {portal} for '{kw}' — skipping retries")
+                self._log(f"0 jobs extracted from {portal} for '{keywords}' — skipping retries")
                 break
 
         # Clean up any leaked tabs from detail page visits

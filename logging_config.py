@@ -69,12 +69,13 @@ def setup_logging(log_level: str = "INFO"):
     buffer_handler.setFormatter(StructuredFormatter())
     root_logger.addHandler(buffer_handler)
 
-    # Silence noisy libraries
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    # Silence noisy libraries — clear their own handlers too
+    for noisy in ["uvicorn.access", "sqlalchemy.engine", "sqlalchemy.pool",
+                   "sqlalchemy.orm", "httpx", "httpcore"]:
+        lg = logging.getLogger(noisy)
+        lg.setLevel(logging.WARNING)
+        lg.handlers.clear()
+        lg.propagate = False
 
     return root_logger
 
