@@ -3,6 +3,14 @@ import sys
 import os
 import json
 import asyncio
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -18,8 +26,8 @@ async def main():
     portals = sys.argv[6] if len(sys.argv) > 6 else "naukri,linkedin,cutshort,glassdoor,timesjobs,shine,foundit,indeed"
     is_us = sys.argv[7].lower() == "true" if len(sys.argv) > 7 else False
 
-    print(f"[BROWSER_AGENT] Starting: query={query}, location={location}, target={target}, fresher={is_fresher}, us={is_us}", flush=True)
-    print(f"[BROWSER_AGENT] Portals: {portals}", flush=True)
+    logger.info(f"Starting: query={query}, location={location}, target={target}, fresher={is_fresher}, us={is_us}")
+    logger.info(f"Portals: {portals}")
 
     agent = BrowserAgent(headless=headless)
 

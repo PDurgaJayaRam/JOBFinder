@@ -2,6 +2,13 @@
 import os
 import sys
 import asyncio
+import logging
+import time
+
+# Structured logging configuration
+from logging_config import setup_logging, get_recent_logs
+setup_logging(os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("api")
 
 # Windows fix: Force ProactorEventLoop BEFORE any event loop is created
 if sys.platform == "win32":
@@ -17,10 +24,15 @@ from dotenv import load_dotenv
 project_root = Path(__file__).parent.parent
 load_dotenv(project_root / ".env")
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Depends
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Depends, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
 
 from database.engine import init_db
 import database.models  # Import to register models with Base
@@ -84,6 +96,138 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting for scraping endpoints
+from rate_limiter import RateLimitMiddleware
+app.add_middleware(RateLimitMiddleware)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all HTTP requests with timing."""
+    start = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - start
+    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({elapsed:.3f}s)")
+    return response
+
+
+# === AUTH CONFIGURATION ===
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+security = HTTPBearer(auto_error=False)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    """Extract user from JWT token. Falls back to default user if no token."""
+    if credentials is None:
+        # Backward-compatible: no token = default user
+        from database.engine import async_session
+        from database.models import User
+        from sqlalchemy import select
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.id == 1))
+            user = result.scalar_one_or_none()
+            if not user:
+                # Create default user
+                user = User(id=1, email="default@local", hashed_password=pwd_context.hash("default"), full_name="Default User")
+                session.add(user)
+                await session.commit()
+                await session.refresh(user)
+            return user
+
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithm=ALGORITHM)
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    from database.engine import async_session
+    from database.models import User
+    from sqlalchemy import select
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == int(user_id)))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+
+
+# Auth models
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str = ""
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+# Auth endpoints
+@app.post("/auth/register")
+async def register(req: RegisterRequest):
+    """Register a new user."""
+    from database.engine import async_session
+    from database.models import User
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        # Check if email exists
+        existing = await session.execute(select(User).where(User.email == req.email))
+        if existing.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        user = User(
+            email=req.email,
+            hashed_password=pwd_context.hash(req.password),
+            full_name=req.full_name,
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        token = create_access_token({"sub": str(user.id)})
+        logger.info(f"New user registered: {req.email}")
+        return {"access_token": token, "token_type": "bearer", "user_id": user.id}
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest):
+    """Login and get JWT token."""
+    from database.engine import async_session
+    from database.models import User
+    from sqlalchemy import select
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.email == req.email))
+        user = result.scalar_one_or_none()
+        if not user or not pwd_context.verify(req.password, user.hashed_password):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        token = create_access_token({"sub": str(user.id)})
+        logger.info(f"User logged in: {req.email}")
+        return {"access_token": token, "token_type": "bearer", "user_id": user.id}
+
+
+@app.get("/auth/me")
+async def get_me(user=Depends(get_current_user)):
+    """Get current user info."""
+    return {"user_id": user.id, "email": user.email, "full_name": user.full_name}
+
 
 @app.get("/")
 async def root():
@@ -109,7 +253,73 @@ async def health():
     return {"status": "healthy"}
 
 
-@app.post("/jobs/search")
+# === RATE LIMITING ===
+
+class RateLimiter:
+    """Simple in-memory sliding window rate limiter."""
+    def __init__(self):
+        self._requests: Dict[str, List[float]] = {}
+
+    def _clean(self, key: str, window: int):
+        now = time.time()
+        if key in self._requests:
+            self._requests[key] = [t for t in self._requests[key] if now - t < window]
+
+    def check(self, key: str, max_requests: int, window_seconds: int = 60) -> bool:
+        """Return True if request is allowed."""
+        self._clean(key, window_seconds)
+        if key not in self._requests:
+            self._requests[key] = []
+        if len(self._requests[key]) >= max_requests:
+            return False
+        self._requests[key].append(time.time())
+        return True
+
+
+_rate_limiter = RateLimiter()
+
+
+def rate_limit(max_requests: int, window_seconds: int = 60):
+    """Dependency factory for rate limiting endpoints."""
+    async def _check(request: Request):
+        key = f"{request.url.path}:{request.client.host}"
+        if not _rate_limiter.check(key, max_requests, window_seconds):
+            raise HTTPException(status_code=429, detail="Too many requests. Please wait.")
+    return _check
+
+
+# In-memory log buffer for /api/v1/logs
+_log_buffer: List[Dict[str, Any]] = []
+_MAX_LOG_ENTRIES = 500
+
+
+class LogHandler(logging.Handler):
+    """Capture log records into an in-memory buffer."""
+    def emit(self, record):
+        _log_buffer.append({
+            "time": self.formatter.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        })
+        if len(_log_buffer) > _MAX_LOG_ENTRIES:
+            _log_buffer.pop(0)
+
+
+_log_handler = LogHandler()
+_log_handler.setFormatter(logging.Formatter("%(asctime)s", "%Y-%m-%d %H:%M:%S"))
+logging.getLogger().addHandler(_log_handler)
+
+
+@app.get("/api/v1/logs")
+async def get_logs(level: str = "INFO", limit: int = 100):
+    """Get recent log entries."""
+    level_upper = level.upper()
+    filtered = [e for e in _log_buffer if e["level"] == level_upper or level_upper == "ALL"]
+    return {"logs": filtered[-limit:], "total": len(filtered)}
+
+
+@app.post("/jobs/search", dependencies=[Depends(rate_limit(30, 60))])
 async def search_jobs(req: SearchRequest):
     """Run job discovery + intelligence + resume matching pipeline."""
     try:
@@ -383,7 +593,7 @@ class WorkflowRequest(BaseModel):
     max_results: int = 20
 
 
-@app.post("/workflow/run")
+@app.post("/workflow/run", dependencies=[Depends(get_current_user)])
 async def run_workflow(req: WorkflowRequest):
     """Run complete multi-agent workflow: search -> analyze -> apply -> report."""
     try:
@@ -503,7 +713,7 @@ async def chat(req: ChatRequest):
 
 # === SAVED JOBS DASHBOARD ===
 
-@app.get("/saved-jobs")
+@app.get("/saved-jobs", dependencies=[Depends(get_current_user)])
 async def get_saved_jobs(limit: int = 100, offset: int = 0, status: str = None, days: int = None):
     """Get all saved jobs from database. Pass days=7 to show only jobs posted in last 7 days."""
     from agents.job_saver import JobSaver
@@ -512,7 +722,7 @@ async def get_saved_jobs(limit: int = 100, offset: int = 0, status: str = None, 
     return {"jobs": jobs, "count": len(jobs)}
 
 
-@app.get("/saved-jobs/stats")
+@app.get("/saved-jobs/stats", dependencies=[Depends(get_current_user)])
 async def get_saved_jobs_stats():
     """Get saved jobs statistics."""
     from agents.job_saver import JobSaver
@@ -520,7 +730,7 @@ async def get_saved_jobs_stats():
     return await saver.get_stats()
 
 
-@app.post("/saved-jobs/apply/{job_id}")
+@app.post("/saved-jobs/apply/{job_id}", dependencies=[Depends(get_current_user)])
 async def apply_to_saved_job(job_id: int):
     """Mark a job as applied."""
     from database.engine import async_session
@@ -544,7 +754,7 @@ from datetime import datetime
 
 # === ENHANCED JOB MATCHING ENDPOINTS ===
 
-@app.post("/jobs/{job_id}/analyze")
+@app.post("/jobs/{job_id}/analyze", dependencies=[Depends(get_current_user)])
 async def analyze_job_match(job_id: int):
     """
     Analyze how well user's resume matches this job
@@ -618,7 +828,7 @@ async def analyze_job_match(job_id: int):
         return match_result
 
 
-@app.post("/jobs/{job_id}/generate-resume")
+@app.post("/jobs/{job_id}/generate-resume", dependencies=[Depends(get_current_user)])
 async def generate_custom_resume(job_id: int):
     """
     Generate custom resume tailored for this specific job
@@ -1183,7 +1393,7 @@ class FormAnalyzeRequest(BaseModel):
 auto_apply_agent = None
 
 
-@app.post("/api/v5/auto-apply/submit")
+@app.post("/api/v5/auto-apply/submit", dependencies=[Depends(rate_limit(10, 60)), Depends(get_current_user)])
 async def submit_application(req: AutoApplyRequest):
     """Automatically apply to a job."""
     global auto_apply_agent

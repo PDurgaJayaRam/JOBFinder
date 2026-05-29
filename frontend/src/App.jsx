@@ -6,13 +6,15 @@ import JobSearch from './components/JobSearch'
 import LeadGen from './components/LeadGen'
 import ComboRun from './components/ComboRun'
 import Analytics from './components/Analytics'
+import Chat from './components/Chat'
 
 function App() {
   return (
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<Chat />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/jobs" element={<JobSearch />} />
           <Route path="/leads" element={<LeadGen />} />
           <Route path="/combo" element={<ComboRun />} />

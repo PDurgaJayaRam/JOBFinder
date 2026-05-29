@@ -11,6 +11,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from playwright.async_api import Page, Browser, BrowserContext, async_playwright
 
+logger = logging.getLogger(__name__)
+
 # Windows fix: ensure ProactorEventLoop for subprocess support
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -51,9 +53,13 @@ class BrowserController:
             from cloakbrowser import launch_async
             logger.info("Launching CloakBrowser (headless=%s)...", self.headless)
             print(f"[BROWSER] Launching CloakBrowser (headless={self.headless})...", flush=True)
-            self.browser = await launch_async(headless=self.headless, humanize=True)
+            # Timeout CloakBrowser launch at 20s — update checks can hang
+            self.browser = await asyncio.wait_for(
+                launch_async(headless=self.headless, humanize=True),
+                timeout=20,
+            )
             logger.info("CloakBrowser launched OK")
-            print("[BROWSER] CloakBrowser launched OK", flush=True)
+            logger.info("CloakBrowser launched OK")
         except Exception as e:
             logger.warning("CloakBrowser failed (%s), falling back to raw Playwright", e)
             print(f"[BROWSER] CloakBrowser failed ({e}), falling back to raw Playwright", flush=True)
@@ -880,13 +886,79 @@ class BrowserController:
         return jobs
 
     async def _extract_timesjobs_jobs(self) -> List[Dict[str, Any]]:
-        """Extract TimesJobs jobs - uses /job-detail/ or /jobs/<keyword>-jobs-<id> pattern."""
-        jobs = await self._extract_with_patterns([
-            r'/job-detail/',
-            r'/jobs/.*-jobs-\d+',
-            r'/jobs/\d+',
-            r'/job/\d+',
-        ], 'timesjobs')
+        """Extract TimesJobs jobs using dedicated JS extraction."""
+        jobs = await self.page.evaluate(r"""() => {
+            const jobs = [];
+            const seenUrls = new Set();
+            const cards = document.querySelectorAll(
+                'li.clearfix.job-bx, div.job-bx, li[class*="job-bx"], ' +
+                'div[class*="srpJob"], div[class*="job-listing"], ' +
+                'ul[class*="job"] li, div.new-joblist li, ' +
+                'div[class*="job-card"], div[class*="jobCard"], li[class*="result-card"], ' +
+                'div[class*="search-result"], article[class*="job"]'
+            );
+            cards.forEach(card => {
+                const titleEl = card.querySelector(
+                    'h2 a, h3 a, a[class*="job-title"], a[class*="title"], ' +
+                    '.joblist-comp-name + a, a[href*="job-detail"], a[title], h2, h3'
+                );
+                const companyEl = card.querySelector(
+                    'h3.joblist-comp-name, span.company-name, [class*="company"], a[class*="company"]'
+                );
+                const locEl = card.querySelector(
+                    'span[class*="location"], [class*="loc"], li.location, span.loc'
+                );
+                const descEl = card.querySelector(
+                    'ul.list-job-dtl li, p[class*="desc"], [class*="description"], span.job-desc'
+                );
+                const expEl = card.querySelector(
+                    'span.exp, li.exp, [class*="experience"], [class*="exp"]'
+                );
+                const salaryEl = card.querySelector(
+                    'span.salary, li.salary, [class*="salary"]'
+                );
+                if (titleEl) {
+                    const title = titleEl.innerText?.trim() || '';
+                    const href = titleEl.href || titleEl.querySelector('a')?.href || '';
+                    if (title && title.length > 3 && title.length < 150 && !seenUrls.has(href)) {
+                        seenUrls.add(href);
+                        jobs.push({
+                            title,
+                            company: companyEl?.innerText?.trim() || 'Unknown',
+                            location: locEl?.innerText?.trim() || '',
+                            source: 'timesjobs',
+                            source_url: href,
+                            apply_url: href,
+                            salary: salaryEl?.innerText?.trim() || '',
+                            description: descEl?.innerText?.trim() || '',
+                            experience_required: expEl?.innerText?.trim() || '',
+                        });
+                    }
+                }
+            });
+            // Fallback: try generic link extraction
+            if (jobs.length === 0) {
+                document.querySelectorAll('a[href*="/job-detail/"]').forEach(link => {
+                    const href = link.href || '';
+                    const text = link.innerText?.trim() || '';
+                    if (text.length > 3 && text.length < 150 && !seenUrls.has(href)) {
+                        seenUrls.add(href);
+                        jobs.push({
+                            title: text,
+                            company: 'Unknown',
+                            location: '',
+                            source: 'timesjobs',
+                            source_url: href,
+                            apply_url: href,
+                            salary: '',
+                            description: '',
+                            experience_required: '',
+                        });
+                    }
+                });
+            }
+            return jobs;
+        }""")
 
         # If no jobs found, try generic extraction as fallback
         if not jobs:

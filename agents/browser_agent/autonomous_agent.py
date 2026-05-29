@@ -22,8 +22,11 @@ import random
 import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+import logging
 from ai.ai_client import get_ai_client
 from agents.browser_agent.browser_controller import BrowserController
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_posted_date(text: str) -> Optional[datetime]:
@@ -113,7 +116,7 @@ class AutonomousAgent:
 
     def _log(self, message: str):
         self._log_entries.append(message)
-        print(f"[AGENT] {message}", flush=True)
+        logger.info(message)
 
     async def _mistral_action(self, instruction: str, screenshot_b64: str = None) -> Dict:
         """Ask Mistral to perform a visual action (click, scroll, select)."""
@@ -190,40 +193,50 @@ Respond with ONLY a JSON object:
         # original portal after redirect (allow if redirected to job content)
         is_glassdoor = "glassdoor" in job_url.lower()
 
-        new_page = None
-        try:
-            new_page = await self.browser.context.new_page()
-            await new_page.goto(job_url, wait_until='domcontentloaded', timeout=20000)
-
-            # Check if we landed on a Cloudflare challenge or login page
-            page_url = new_page.url
-            page_title = ""
+        for attempt in range(3):  # Retry twice on failure
+            new_page = None
             try:
-                page_title = (await new_page.title()).lower()
-            except:
-                pass
-            # Skip if stuck on challenge page
-            if "challenge" in page_url or "cdn-cgi" in page_url or "glassdoor.com/verify" in page_url:
-                await new_page.close()
-                return {}
+                new_page = await self.browser.context.new_page()
+                try:
+                    await new_page.goto(job_url, wait_until='domcontentloaded', timeout=45000)
+                except Exception as nav_err:
+                    if attempt < 2:
+                        await asyncio.sleep(2 + attempt * 2)
+                        if new_page:
+                            try: await new_page.close()
+                            except: pass
+                        continue
+                    raise
 
-            # Check page content for Cloudflare block
-            try:
-                quick_content = (await new_page.content()).lower()
-                if "humans only" in quick_content or "ray id:" in quick_content and "cloudflare" in quick_content:
+                # Check if we landed on a Cloudflare challenge or login page
+                page_url = new_page.url
+                page_title = ""
+                try:
+                    page_title = (await new_page.title()).lower()
+                except:
+                    pass
+                # Skip if stuck on challenge page
+                if "challenge" in page_url or "cdn-cgi" in page_url or "glassdoor.com/verify" in page_url:
                     await new_page.close()
                     return {}
-            except:
-                pass
 
-            # If redirected to login/signin, try to grab whatever is visible
-            if "login" in page_url or "signin" in page_url or "auth" in page_url:
-                pass  # Still try to extract — some pages show partial content
+                # Check page content for Cloudflare block
+                try:
+                    quick_content = (await new_page.content()).lower()
+                    if "humans only" in quick_content or "ray id:" in quick_content and "cloudflare" in quick_content:
+                        await new_page.close()
+                        return {}
+                except:
+                    pass
 
-            await asyncio.sleep(2)
+                # If redirected to login/signin, try to grab whatever is visible
+                if "login" in page_url or "signin" in page_url or "auth" in page_url:
+                    pass  # Still try to extract — some pages show partial content
 
-            # Extract using DOM — multi-strategy for all portals
-            job_data = await new_page.evaluate("""() => {
+                await asyncio.sleep(2)
+
+                # Extract using DOM — multi-strategy for all portals
+                job_data = await new_page.evaluate("""() => {
                 const data = {
                     title: '',
                     company: '',
@@ -272,6 +285,9 @@ Respond with ONLY a JSON object:
                     '[class*="jd-desc"]', '[class*="description"]',
                     '[data-testid="job-description"]',
                     '[class*="jobDescription"]', '[class*="detail"]',
+                    '[class*="job-detail"]', '[class*="jobDetail"]',
+                    '[class*="jd-section"]', '[class*="job-desc"]',
+                    '[class*="detail-description"]',
                     'article', '[class*="content"]', 'main'
                 ]) {
                     const el = document.querySelector(sel);
@@ -349,21 +365,24 @@ Respond with ONLY a JSON object:
                 return data;
             }""")
 
-            await new_page.close()
-            new_page = None
+                await new_page.close()
+                new_page = None
 
-            if job_data and job_data.get("title"):
-                self._log(f"Extracted job: {job_data.get('title', 'Unknown')}")
-                return job_data
+                if job_data and job_data.get("title"):
+                    self._log(f"Extracted job: {job_data.get('title', 'Unknown')}")
+                    return job_data
 
-        except Exception as e:
-            self._log(f"Job detail extraction error: {e}")
-        finally:
-            if new_page:
-                try:
-                    await new_page.close()
-                except:
-                    pass
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2 + attempt * 2)  # Increasing backoff
+                    continue
+                self._log(f"Job detail extraction error: {e}")
+            finally:
+                if new_page:
+                    try:
+                        await new_page.close()
+                    except:
+                        pass
 
         return {}
 
@@ -487,10 +506,10 @@ Respond with ONLY a JSON object:
 
         self._log(f"Launching browser (headless={self.browser.headless})...")
         try:
-            await asyncio.wait_for(self.browser.start(), timeout=60)
+            await asyncio.wait_for(self.browser.start(), timeout=90)
             self._log(f"Browser launched successfully")
         except asyncio.TimeoutError:
-            self._log(f"ERROR: Browser launch timed out after 60s")
+            self._log(f"ERROR: Browser launch timed out after 90s")
             await self.browser.close()
             return []
         except Exception as e:
@@ -499,7 +518,9 @@ Respond with ONLY a JSON object:
         all_jobs = []
         seen_urls = set()
         self._search_cache = {}  # {(portal, keyword, location): {"jobs": [...], "timestamp": float}}
+        self._glassdoor_blocked = False  # Track if Glassdoor triggered CAPTCHA
         portals_to_search = portals or ["naukri", "indeed", "linkedin"]
+        glassdoor_blocked = False  # Once CAPTCHA hits, skip for all remaining keywords
 
         # Split keywords — search each one separately to maximize coverage
         keyword_list = [k.strip() for k in keywords.split(",") if k.strip()]
@@ -518,7 +539,7 @@ Respond with ONLY a JSON object:
 
                 # Delay between keyword rounds — longer if Glassdoor is in the mix
                 if kw_idx > 0:
-                    delay = random.uniform(10, 15) if "glassdoor" in portals_to_search else random.uniform(5, 10)
+                    delay = random.uniform(10, 15) if "glassdoor" in portals_to_search and not glassdoor_blocked else random.uniform(5, 10)
                     await asyncio.sleep(delay)
 
                 self._log(f"\n{'#'*60}")
@@ -542,7 +563,11 @@ Respond with ONLY a JSON object:
 
                     # Extra delay before Glassdoor to avoid anti-bot CAPTCHA
                     if portal == "glassdoor":
-                        await asyncio.sleep(random.uniform(3, 6))
+                        # Skip Glassdoor entirely if it was blocked in a previous keyword round
+                        if getattr(self, '_glassdoor_blocked', False):
+                            self._log(f"Glassdoor previously blocked — skipping")
+                            continue
+                        await asyncio.sleep(random.uniform(8, 15))
 
                     try:
                         portal_jobs = await asyncio.wait_for(
@@ -632,6 +657,12 @@ Respond with ONLY a JSON object:
                 pass
 
             try:
+                # Stealth: disable webdriver flag before Glassdoor navigation
+                if portal == "glassdoor":
+                    try:
+                        await self.browser.page.evaluate("() => { Object.defineProperty(navigator, 'webdriver', {get: () => false}); }")
+                    except:
+                        pass
                 await self.browser.go_to(search_url, timeout=30000)
                 await self.browser.wait(2)
             except Exception as e:
@@ -642,12 +673,21 @@ Respond with ONLY a JSON object:
             try:
                 page_content = await self.browser.page.content()
                 page_content_lower = page_content.lower()
-                if ("ray id:" in page_content_lower and "cloudflare" in page_content_lower) or \
-                   "humans only" in page_content_lower or \
-                   "access denied" in page_content_lower or \
-                   "cf_chl" in page_content_lower:
+                captcha_signals = [
+                    ("ray id:" in page_content_lower and "cloudflare" in page_content_lower),
+                    "humans only" in page_content_lower,
+                    "access denied" in page_content_lower,
+                    "cf_chl" in page_content_lower,
+                    "verify you are human" in page_content_lower,
+                    "security check" in page_content_lower and "glassdoor" in portal,
+                    "captcha" in page_content_lower,
+                    "unusual traffic" in page_content_lower,
+                ]
+                if any(captcha_signals):
                     self._log(f"BLOCKED: {portal} returned anti-bot challenge for '{kw}' — skipping keyword")
-                    # Don't permanently mark portal — just skip this keyword, next keyword might work
+                    # Mark Glassdoor as blocked so we skip it for remaining keywords
+                    if portal == "glassdoor":
+                        self._glassdoor_blocked = True
                     break  # Skip to next keyword/portal
             except:
                 pass
@@ -758,7 +798,7 @@ Respond with ONLY a JSON object:
                         if "cloudflare" in desc_lower or "ray id:" in desc_lower:
                             job["description"] = ""
                             has_desc = False
-                    if not has_desc and job_url and api_detail_visits < 5:
+                    if not has_desc and job_url and api_detail_visits < 15:
                         import random
                         await asyncio.sleep(random.uniform(1.5, 3.5))
                         api_detail_visits += 1
@@ -1176,7 +1216,7 @@ Respond with ONLY a JSON object:
             ko_e = ko_s + len(kw_dash)
             return f"https://www.glassdoor.co.in/Job/{kw_dash}-{loc_dash}-jobs-SRCH_IL.0,{len(loc_dash)}_KO{ko_s},{ko_e}.htm"
         elif portal == "timesjobs":
-            return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc}"
+            return f"https://www.timesjobs.com/timesjobs/search/keywords/{kw_dash}/{loc_dash}"
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":

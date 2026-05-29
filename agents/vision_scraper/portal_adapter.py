@@ -26,7 +26,7 @@ PORTALS: Dict[str, Dict] = {
     "timesjobs": {
         "name": "TimesJobs",
         "base_url": "https://www.timesjobs.com",
-        "search_url": "https://www.timesjobs.com/timesjobs/search/keywords/{query}",
+        "search_url": "https://www.timesjobs.com/timesjobs/search/keywords/{query}/{location}",
         "country": "in",
     },
     "shine": {

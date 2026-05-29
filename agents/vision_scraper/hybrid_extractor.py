@@ -134,6 +134,64 @@ INDEED_EXTRACTION_JS = """() => {
     return jobs;
 }"""
 
+TIMESJOBS_EXTRACTION_JS = """() => {
+    const jobs = [];
+    const seenUrls = new Set();
+    const cards = document.querySelectorAll(
+        'li.clearfix.job-bx, div.job-bx, li[class*="job-bx"], ' +
+        'div[class*="srpJob"], div[class*="job-listing"], ' +
+        'ul[class*="job"] li, div.new-joblist li'
+    );
+    cards.forEach(card => {
+        const titleEl = card.querySelector(
+            'h2 a, h3 a, a[class*="job-title"], a[class*="title"], ' +
+            '.joblist-comp-name + a, a[href*="job-detail"], ' +
+            'a[title], h2, h3'
+        );
+        const companyEl = card.querySelector(
+            'h3.joblist-comp-name, span.company-name, [class*="company"], ' +
+            'a[class*="company"], [class*="comp-name"]'
+        );
+        const locEl = card.querySelector(
+            'span[class*="location"], [class*="loc"], li.location, ' +
+            'span.loc, [class*="Location"]'
+        );
+        const descEl = card.querySelector(
+            'ul.list-job-dtl li, p[class*="desc"], [class*="description"], ' +
+            'span.job-desc, div[class*="desc"]'
+        );
+        const expEl = card.querySelector(
+            'span.exp, li.exp, [class*="experience"], [class*="exp"]'
+        );
+        const salaryEl = card.querySelector(
+            'span.salary, li.salary, [class*="salary"], [class*="sal"]'
+        );
+        const postedEl = card.querySelector(
+            'span.posted, [class*="posted"], [class*="date"], span.sim-posted'
+        );
+        if (titleEl) {
+            const title = titleEl.innerText?.trim() || '';
+            const href = titleEl.href || titleEl.querySelector('a')?.href || '';
+            if (title && title.length > 3 && title.length < 150 && !seenUrls.has(href)) {
+                seenUrls.add(href);
+                jobs.push({
+                    title,
+                    company: companyEl?.innerText?.trim() || 'Unknown',
+                    location: locEl?.innerText?.trim() || '',
+                    source: 'timesjobs',
+                    source_url: href,
+                    apply_url: href,
+                    salary: salaryEl?.innerText?.trim() || '',
+                    description: descEl?.innerText?.trim() || '',
+                    experience_required: expEl?.innerText?.trim() || '',
+                    posted_text: postedEl?.innerText?.trim() || ''
+                });
+            }
+        }
+    });
+    return jobs;
+}"""
+
 GENERIC_EXTRACTION_JS = """() => {
     const jobs = [];
     const seenUrls = new Set();
@@ -179,6 +237,7 @@ PORTAL_JS_MAP = {
     "linkedin_us": LINKEDIN_EXTRACTION_JS,
     "indeed_in": INDEED_EXTRACTION_JS,
     "indeed_us": INDEED_EXTRACTION_JS,
+    "timesjobs": TIMESJOBS_EXTRACTION_JS,
 }
 
 

@@ -2,8 +2,11 @@
 import os
 import sys
 import json
+import logging
 import subprocess
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class JobDiscoveryAgent:
@@ -53,7 +56,7 @@ class JobDiscoveryAgent:
                 print(f"Browser agent stderr: {result.stderr[:500]}", flush=True)
 
         except subprocess.TimeoutExpired:
-            print("Browser agent timed out (180s), using fallback", flush=True)
+            logger.warning("Browser agent timed out (180s), using fallback")
         except Exception as e:
             print(f"Browser agent error: {e}", flush=True)
 
