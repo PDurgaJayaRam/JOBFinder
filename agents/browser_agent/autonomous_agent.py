@@ -1216,7 +1216,7 @@ Respond with ONLY a JSON object:
             ko_e = ko_s + len(kw_dash)
             return f"https://www.glassdoor.co.in/Job/{kw_dash}-{loc_dash}-jobs-SRCH_IL.0,{len(loc_dash)}_KO{ko_s},{ko_e}.htm"
         elif portal == "timesjobs":
-            return f"https://www.timesjobs.com/timesjobs/search/keywords/{kw_dash}/{loc_dash}"
+            return f"https://www.timesjobs.com/candidate/job-search.html?from=submit&actualTxtKeywords={kw_dash}&searchBy=1&fjType=1&jobType=1&locationType=1&location={loc_dash}"
         elif portal == "shine":
             return f"https://www.shine.com/job-search/{kw_dash}-jobs-in-{loc_dash}"
         elif portal == "foundit":

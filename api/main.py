@@ -10,6 +10,10 @@ from logging_config import setup_logging, get_recent_logs
 setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("api")
 
+# Silence noisy SQLAlchemy engine logs (keep only warnings+)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+
 # Windows fix: Force ProactorEventLoop BEFORE any event loop is created
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
